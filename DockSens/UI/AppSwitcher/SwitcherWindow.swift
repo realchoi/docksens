@@ -169,8 +169,12 @@ class SwitcherPanelController {
     
     private func activateWindow(_ window: WindowInfo) {
         // 简单实现：通过 NSRunningApplication 激活
-        // 实际上应该结合 AXUIElementRaise 来处理具体窗口
+        // 实际上应该结合 AXUIElementRaise 来处理具体窗口以确保只有目标窗口前置
         let app = NSWorkspace.shared.runningApplications.first(where: { $0.processIdentifier == window.pid })
-        app?.activate(options: .activateIgnoringOtherApps)
+        
+        // FIX: macOS 14+ 废弃了 .activateIgnoringOtherApps，且无效果。
+        // 直接调用 activate(options:)。由于此调用是在响应用户快捷键/点击，系统通常会允许前台激活。
+        // 使用 .activateAllWindows 确保应用的所有窗口都变为活跃状态（类似点击 Dock 图标的行为）
+        app?.activate(options: .activateAllWindows)
     }
 }
