@@ -49,42 +49,38 @@ struct DockSensApp: App {
         .windowResizability(.contentSize)
         
         // MARK: - Menu Bar Item
-        // FIX: 使用 SF Symbol 图标 macwindow.on.rectangle
         MenuBarExtra("DockSens", systemImage: "macwindow.on.rectangle") {
-            // 1. 状态指示 (通常作为第一项，且不可点击)
+            // 1. 状态指示
             Button("DockSens 正在运行") { }
                 .disabled(true)
             
             Divider()
             
-            // 2. 快速开关 (暂停/恢复预览)
+            // 2. 快速开关
             Button {
                 showDockPreviews.toggle()
             } label: {
-                if showDockPreviews {
-                    Text("暂停预览") // 当前开启，点击暂停
-                } else {
-                    Text("恢复预览") // 当前暂停，点击恢复
+                Text(showDockPreviews ? "暂停预览" : "恢复预览")
+            }
+            
+            // 3. 窗口切换器
+            Button("切换窗口") {
+                Task { @MainActor in
+                    appState.toggleSwitcher()
                 }
             }
             
-            // 3. 窗口切换器触发入口
-            Button("切换窗口") {
-                appState.toggleSwitcher()
+            Divider()
+            
+            // 4. 打开设置
+            Button("设置...") {
+                NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+                NSApp.activate(ignoringOtherApps: true)
             }
-            .keyboardShortcut("w", modifiers: [.option, .command])
             
             Divider()
             
-            // 4. 打开设置 (使用 SwiftUI 原生 API)
-            SettingsLink {
-                Text("设置...")
-            }
-            .keyboardShortcut(",", modifiers: [.command])
-            
-            Divider()
-            
-            // 5. 退出应用
+            // 5. 退出应用 (修复：确保此按钮始终可见)
             Button("退出 DockSens") {
                 NSApplication.shared.terminate(nil)
             }
@@ -96,14 +92,12 @@ struct DockSensApp: App {
     
     /// 初始化全局快捷键监听
     private func setupShortcuts() {
-        // 绑定: 切换器 (Alt-Tab)
         KeyboardShortcuts.onKeyUp(for: .toggleSwitcher) {
             Task { @MainActor in
                 appState.toggleSwitcher()
             }
         }
         
-        // 绑定: 分屏 (示例逻辑)
         KeyboardShortcuts.onKeyUp(for: .splitLeft) {
             print("Shortcut: Split Left Triggered")
         }
@@ -142,7 +136,6 @@ struct StatusView: View {
             }
             
             HStack {
-                // 使用 Button 模拟打开设置的行为 (因为 SettingsLink 只能在 Menu 中使用)
                 Button("Open Settings") {
                     NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
                 }
