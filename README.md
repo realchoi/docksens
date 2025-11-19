@@ -1,6 +1,6 @@
 ## DockSens
 
-**DockSens 是一款专为 macOS 15 (Sequoia) 及更高版本打造的原生效率工具（商业闭源项目）。它利用最新的 Apple 技术栈，通过 Dock 悬浮预览、现代化的窗口分屏以及增强型 Alt-Tab 切换器，全面提升 macOS 工作流体验。**
+**DockSens 是一款专为 macOS 15 (Sequoia) 及更高版本打造的原生效率工具。它利用最新的 Apple 技术栈，通过 Dock 悬浮预览、现代化的窗口分屏以及增强型 Alt-Tab 切换器，全面提升 macOS 工作流体验。**
 
 **DockSens: Supercharge your macOS workflow with Dock window previews, snapping, and a modern Alt-Tab switcher.**
 
@@ -30,13 +30,15 @@
 
 - 支持键盘方向键导航，即便在后台也能流畅响应。
 
-#### ⚡️ 极致原生与性能
+
+### ⚡️ 极致原生与性能
 
 - 专为 Apple Silicon 优化。
 
 - 极低的内存占用，利用 Swift 6 并发模型确保主线程零卡顿。
 
-#### 🛠 技术栈 (Tech Stack)
+
+### 🛠 技术栈 (Tech Stack)
 
 - 本项目采用最新的 macOS 开发技术栈：
 
@@ -52,7 +54,8 @@
 
 - 商业化: StoreKit 2 (SubscriptionStoreView 原生订阅界面)
 
-#### 💻 开发环境配置 (Dev Setup)
+
+### 💻 开发环境配置 (Dev Setup)
 
 **环境要求**
 
@@ -64,7 +67,8 @@
 
 - 权限调试 (Debug Permissions)
 
-由于应用依赖敏感的系统权限，在 Debug 模式下首次运行需要手动授权：
+
+**由于应用依赖敏感的系统权限，在 Debug 模式下首次运行需要手动授权：**
 
 - 构建并运行 App (Cmd + R)。
 
@@ -76,7 +80,8 @@
 
 **注意：** 每次 Clean Build Folder 后，可能需要重新勾选权限。
 
-#### ⚖️ 版权与许可 (Copyright & License)
+
+### ⚖️ 版权与许可 (Copyright & License)
 
 **Copyright © 2025 DockSens. All Rights Reserved.**
 
@@ -84,6 +89,6 @@
 
 - 源代码仅供内部开发与维护使用。
 
-- 依赖的第三方库（如有）遵循其各自的开源协议。
+- 依赖的第三方库遵循其各自的开源协议。
 
 - Internal Development Documentation.
