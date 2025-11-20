@@ -16,7 +16,7 @@ class WindowManager {
     private let engine = WindowEngine()
     private var windowContinuation: AsyncStream<[WindowInfo]>.Continuation?
     
-    // MARK: - MRU Tracking (New)
+    // MARK: - MRU Tracking
     // 历史记录栈：存放最近激活过的 App PID，越靠前越新
     private var mruPIDs: [pid_t] = []
     private var observer: NSObjectProtocol?
@@ -54,7 +54,6 @@ class WindowManager {
                         return idx1 < idx2 // MRU 优先 (index 越小越靠前)
                     } else {
                         // 如果 App 相同或都不在 MRU 列表里，保持原始稳定性 (Z-Order)
-                        // 使用原始数组中的索引来比较
                         let rawIdx1 = rawWindows.firstIndex(where: {$0.id == w1.id}) ?? Int.max
                         let rawIdx2 = rawWindows.firstIndex(where: {$0.id == w2.id}) ?? Int.max
                         return rawIdx1 < rawIdx2
@@ -116,14 +115,21 @@ class WindowManager {
             object: nil,
             queue: .main
         ) { [weak self] notification in
-            // ⚡️ 修复警告：使用 Task { @MainActor } 包裹闭包逻辑
-            // 即使 queue 是 .main，Swift 编译器也需要显式上下文切换
+            // ⚠️ 修复 Swift 6 警告：
+            // Notification 不是 Sendable，不能在 Task 闭包中直接捕获。
+            // 我们必须在 Task 外面（同步上下文中）先把需要的数据 (pid) 提取出来。
+            
+            guard let userInfo = notification.userInfo,
+                  let app = userInfo[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else {
+                return
+            }
+            
+            // 提取 pid (Int32 是 Sendable 的)
+            let pid = app.processIdentifier
+            
+            // 现在可以安全地开启 Task，只捕获 Sendable 的 pid 和 weak self
             Task { @MainActor [weak self] in
-                guard let self = self,
-                      let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else {
-                    return
-                }
-                self.updateMRU(with: app.processIdentifier)
+                self?.updateMRU(with: pid)
             }
         }
     }
