@@ -18,37 +18,53 @@ struct DockSensApp: App {
     @AppStorage("hasCompletedOnboarding") var hasCompletedOnboarding: Bool = false
     @AppStorage("showDockPreviews") private var showDockPreviews: Bool = true
     
-    // 3. 初始化：确保 App 启动时立即注册快捷键
     init() {
         setupShortcuts()
     }
     
     var body: some Scene {
-        // 设置窗口
+        // 设置窗口 (独立 Scene)
         Settings {
             SettingsView()
                 .environment(appState)
         }
         
-        // 主窗口 (状态/引导)
+        // 引导窗口
+        // 注意：作为 Agent App，我们只在需要时显示 WindowGroup
+        // 如果引导已完成，我们在这里返回一个 EmptyView 或者不常用的 Scene，
+        // 但 SwiftUI 必须至少有一个 WindowGroup。
+        // 这里的策略是：如果已完成，我们显示一个不可见的窗口并立即关闭它，或者干脆保留 StatusView 但不自动激活。
+        // 更佳实践：Agent App 通常只保留 Settings，引导页也可以作为特殊窗口弹出。
+        // 这里为了兼容现有结构，我们保留逻辑，但在 onAppear 处理激活。
         WindowGroup {
-            Group {
+            ZStack {
                 if !hasCompletedOnboarding {
                     OnboardingView()
                         .environment(appState)
                         .frame(minWidth: 700, minHeight: 500)
+                        .onAppear {
+                            // ⚡️ 关键：Agent App 启动时默认无焦点。
+                            // 如果显示引导页，必须强行把自己拉到前台！
+                            NSApp.activate(ignoringOtherApps: true)
+                        }
                 } else {
-                    StatusView()
-                        .environment(appState)
+                    // 引导完成后，我们不需要主窗口常驻。
+                    // 显示一个空视图，并在出现时关闭主窗口（只留菜单栏）
+                    Color.clear
+                        .onAppear {
+                            // 关闭当前窗口，只保留菜单栏图标
+                            NSApp.windows.first?.close()
+                        }
                 }
             }
         }
         .windowResizability(.contentSize)
-        // ❌ 注意：这里不再需要 .alert(...)，因为我们改用 NSAlert 在 AppState 中直接弹窗
+        // 确保主窗口关闭后 App 不退出 (Agent 默认行为，但也显式指定一下)
+        .defaultSize(width: 0, height: 0) 
         
         // 菜单栏图标
         MenuBarExtra("DockSens", systemImage: "macwindow.on.rectangle") {
-            Button("DockSens 正在运行") { }.disabled(true)
+            Button("DockSens Is Running") { }.disabled(true)
             Divider()
             Button {
                 showDockPreviews.toggle()
@@ -56,12 +72,13 @@ struct DockSensApp: App {
                 Text(showDockPreviews ? "暂停预览" : "恢复预览")
             }
             Button("切换窗口") {
-                // 通过 Task 触发 MainActor 方法
                 Task { @MainActor in appState.toggleSwitcher() }
             }
             Divider()
             Button("设置...") {
+                // 发送标准 Action 打开 Settings Scene
                 NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+                // ⚡️ Agent 打开窗口时必须强行激活自己
                 NSApp.activate(ignoringOtherApps: true)
             }
             Divider()
@@ -72,10 +89,8 @@ struct DockSensApp: App {
         }
     }
     
-    // 静态注册方法
     private func setupShortcuts() {
         KeyboardShortcuts.onKeyUp(for: .toggleSwitcher) {
-            // 监听到快捷键 -> 发送通知 -> AppState 响应
             Task { @MainActor in
                 NotificationCenter.default.post(name: .toggleSwitcher, object: nil)
             }
@@ -83,39 +98,6 @@ struct DockSensApp: App {
     }
 }
 
-// 定义通知名称
 extension Notification.Name {
     static let toggleSwitcher = Notification.Name("ToggleSwitcherRequest")
-}
-
-// StatusView 简单实现
-struct StatusView: View {
-    @Environment(AppState.self) var appState
-    
-    var body: some View {
-        VStack(spacing: 20) {
-            Image(systemName: "checkmark.circle.fill")
-                .font(.system(size: 60))
-                .foregroundStyle(.green)
-                .symbolEffect(.bounce, value: true)
-            
-            VStack(spacing: 8) {
-                Text("DockSens is Running")
-                    .font(.title2.bold())
-                
-                Text("The app is active in your menu bar.\nYou can safely close this window.")
-                    .font(.body)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-            }
-            
-            Button("Open Settings") {
-                NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
-            }
-            .padding(.top, 10)
-        }
-        .padding(40)
-        .frame(width: 400, height: 350)
-        .background(.regularMaterial)
-    }
 }

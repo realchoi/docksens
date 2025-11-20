@@ -9,7 +9,7 @@ import SwiftUI
 import AppKit
 import ApplicationServices
 
-// MARK: - SwiftUI View
+// MARK: - SwiftUI View (保持不变)
 
 struct SwitcherView: View {
     @ObservedObject var viewModel: SwitcherViewModel
@@ -131,7 +131,8 @@ class SwitcherPanelController {
             backing: .buffered,
             defer: false
         )
-        newPanel.level = .modalPanel // 确保在最上层
+        // Agent App 使用 .modalPanel 可以确保覆盖在大多数窗口之上
+        newPanel.level = .modalPanel
         newPanel.backgroundColor = .clear
         newPanel.isOpaque = false
         newPanel.hasShadow = false
@@ -158,17 +159,12 @@ class SwitcherPanelController {
         currentPanel.contentView = hostingView
         
         viewModel.show(with: windows) { [weak self] selectedWindow in
-            print("🎯 Selection Confirmed: \(selectedWindow.appName)")
+            guard let self = self else { return }
             
-            // ⚡️ 关键修复：
-            // 不要立即 hide()！否则焦点会瞬间回到上一个窗口（Window A），
-            // 导致我们接下来的激活操作（Activate B）被系统视为后台干扰。
-            // 我们先执行激活，等 B 准备好了，再撤掉 DockSens。
-            
+            // ⚡️ Agent App 激活流程：
             Task {
-                await self?.performSequencedActivation(for: selectedWindow)
-                // 激活流程走完后，再隐藏面板，这样用户看到的就是 B 了
-                self?.hide()
+                await self.activateWindowSafely(selectedWindow)
+                self.hide()
             }
         }
         
@@ -179,37 +175,45 @@ class SwitcherPanelController {
         guard panel != nil else { return }
         viewModel.hide()
         
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
             self.panel?.orderOut(nil)
             self.panel = nil
             self.onClose?()
         }
     }
     
-    // MARK: - Precision Activation Strategy
+    // MARK: - Activation Strategy
     
-    private func performSequencedActivation(for window: WindowInfo) async {
+    private func activateWindowSafely(_ window: WindowInfo) async {
         guard let app = NSWorkspace.shared.runningApplications.first(where: { $0.processIdentifier == window.pid }) else {
             return
         }
         
-        print("🚀 Step 1: Activate App \(window.appName)")
-        app.unhide()
-        app.activate(options: .activateAllWindows)
+        print("🚀 Agent Activating: \(window.appName)")
         
-        // 稍微等待 App 响应激活指令
+        // 1. 确保 App 不是隐藏状态 (Agent 必须显式调用 unhide)
+        app.unhide()
+        
+        // 2. 暴力激活
+        // Bit 0: activateIgnoringOtherApps (1 << 0)
+        // Bit 1: activateAllWindows (1 << 1)
+        let rawOptions: UInt = (1 << 0) | (1 << 1)
+        let options = NSApplication.ActivationOptions(rawValue: rawOptions)
+        
+        // Agent 拥有特权，调用此方法通常能成功抢占
+        app.activate(options: options)
+        
+        // 3. 等待 WindowServer 处理
         try? await Task.sleep(for: .milliseconds(50))
         
-        print("🚀 Step 2: AX Raise Specific Window")
-        // 等待 AX 操作完成
-        await activateViaAX(window)
+        // 4. AX 提升具体窗口
+        await performAXRaise(window)
     }
     
-    private func activateViaAX(_ window: WindowInfo) async {
+    private func performAXRaise(_ window: WindowInfo) async {
         let pid = window.pid
-        let targetTitle = window.title
+        let title = window.title
         
-        // FIX: 使用 await ... .value 来等待 Task 执行完毕
         await Task.detached {
             let appRef = AXUIElementCreateApplication(pid)
             var windowsRef: CFTypeRef?
@@ -219,30 +223,22 @@ class SwitcherPanelController {
                 return
             }
             
-            // 精准匹配
-            var match: AXUIElement?
-            for axWindow in windowList {
+            let match = windowList.first { axWindow in
                 var titleRef: CFTypeRef?
                 if AXUIElementCopyAttributeValue(axWindow, kAXTitleAttribute as CFString, &titleRef) == .success,
-                   let titleStr = titleRef as? String, titleStr == targetTitle {
-                    match = axWindow
-                    break
+                   let t = titleRef as? String {
+                    return t == title
                 }
+                return false
             }
             
-            let target = match ?? windowList.first
-            
-            if let finalWindow = target {
-                // 1. 提升层级 (Raise)
-                AXUIElementPerformAction(finalWindow, kAXRaiseAction as CFString)
-                
-                // 2. FIX: 修正 API 名称，设置为“主窗口” (Main)
-                AXUIElementSetAttributeValue(finalWindow, kAXMainAttribute as CFString, true as CFTypeRef)
-                
-                // 3. 尝试设置为“焦点窗口” (Focused) - 双重保险
-                AXUIElementSetAttributeValue(finalWindow, kAXFocusedAttribute as CFString, true as CFTypeRef)
-                
-                print("✅ AX Action Performed (Raise + Main + Focused)")
+            if let targetWindow = match ?? windowList.first {
+                // A. Raise
+                AXUIElementPerformAction(targetWindow, kAXRaiseAction as CFString)
+                // B. Main
+                AXUIElementSetAttributeValue(targetWindow, kAXMainAttribute as CFString, true as CFTypeRef)
+                // C. Focused
+                AXUIElementSetAttributeValue(targetWindow, kAXFocusedAttribute as CFString, true as CFTypeRef)
             }
         }.value
     }

@@ -24,7 +24,6 @@ struct WindowInfo: Identifiable, Sendable {
 }
 
 /// Dock 图标数据模型 (用于 Dock Hover)
-/// ⚠️ 之前丢失的结构体，现已复原
 struct DockIconInfo: Identifiable, Sendable {
     let id: Int
     let title: String
@@ -43,21 +42,28 @@ actor WindowEngine {
         // 1. 获取 SCK 原始内容
         let content = try await SCShareableContent.current
         
-        // 2. 获取 NSWorkspace 的运行中 App 列表 (线程安全)
-        // 我们只关心那些并在 Dock 显示图标的常规 App (.regular)
+        // 2. 获取 NSWorkspace 的运行中 App 列表 (用于验证 PID 和排除 Ghost 窗口)
         let regularApps = NSWorkspace.shared.runningApplications
             .filter { $0.activationPolicy == .regular }
             .reduce(into: [pid_t: NSRunningApplication]()) { $0[$1.processIdentifier] = $1 }
         
-        // 3. 过滤窗口
+        // 3. 获取当前进程 (DockSens) 的 PID，用于精准排除
+        let selfPID = ProcessInfo.processInfo.processIdentifier
+        
+        // 4. 过滤窗口
         let validWindows = content.windows.filter { window in
-            // A. 基础过滤
+            // A. 基础过滤：排除屏幕外、不可见层级、极小窗口
             guard window.isOnScreen,
                   window.windowLayer == 0,
                   window.frame.width > 10, window.frame.height > 10 else { return false }
             
-            // B. 排除自己
-            guard window.owningApplication?.applicationName != "DockSens" else { return false }
+            // B. ❌ 关键修复：绝对排除 DockSens 自身
+            // 如果不排除，DockSens 窗口会进入列表，导致 index 1 (第二个窗口) 变成 DockSens 自己，
+            // 从而破坏 "Alt-Tab 切换回上一个 App" 的逻辑。
+            guard let appPID = window.owningApplication?.processID,
+                  appPID != selfPID else {
+                return false
+            }
             
             // C. Ghost PID 修复：确保该窗口归属于一个“常规 App”
             guard let pid = window.owningApplication?.processID,
@@ -68,7 +74,7 @@ actor WindowEngine {
             return true
         }
         
-        // 4. 并发截图
+        // 5. 并发截图
         return await withTaskGroup(of: WindowInfo?.self) { group in
             for scWindow in validWindows {
                 group.addTask {
@@ -79,6 +85,7 @@ actor WindowEngine {
                     config.height = Int(scWindow.frame.height)
                     config.showsCursor = false
                     
+                    // 捕获异常防止单个窗口失败导致整体崩溃
                     let image = try? await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
                     
                     guard let pid = scWindow.owningApplication?.processID else { return nil }
@@ -103,7 +110,8 @@ actor WindowEngine {
                 }
             }
             
-            // 恢复 Z-Order 排序
+            // 6. 恢复原始 Z-Order 排序 (SCK 返回的 windows 数组本身就是按 Z-Order 排序的)
+            // 这里先按 Z-Order 排好，后续 WindowManager 会再根据 MRU 调整顺序
             return results.sorted { w1, w2 in
                 let idx1 = validWindows.firstIndex(where: { $0.windowID == w1.id }) ?? Int.max
                 let idx2 = validWindows.firstIndex(where: { $0.windowID == w2.id }) ?? Int.max
@@ -114,7 +122,7 @@ actor WindowEngine {
     
     // MARK: - 2. Dock Scanning (Hover / AX)
     
-    /// 扫描 Dock 栏图标布局 (复原的方法)
+    /// 扫描 Dock 栏图标布局
     func scanDockIcons() -> [DockIconInfo] {
         var icons: [DockIconInfo] = []
         
