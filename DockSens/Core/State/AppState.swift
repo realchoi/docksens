@@ -1,32 +1,30 @@
 //
-        //  AppState.swift
-        //  DockSens
-        //
-        //  Created by DockSens Setup Script.
-        //
+//  AppState.swift
+//  DockSens
+//
+//  Created by DockSens Setup Script.
+//
 
-        import SwiftUI
+import SwiftUI
 import Observation
-
-        // TODO: 全局单一事实来源。整合 WindowManager 和 StoreService 的状态。
-        // ---------------------------------------------------------
-
 
 @MainActor
 @Observable
 final class AppState {
-    // --- 核心状态 ---
     var runningWindows: [WindowInfo] = []
     var isSwitcherVisible: Bool = false
-    var isPro: Bool = false // 内购状态
+    var isPro: Bool = false 
     
-    // --- 内部服务 ---
     private let windowManager = WindowManager()
     private let storeService = StoreService()
     
     init() {
         Task { await startMonitoringWindows() }
         Task { await startMonitoringPurchases() }
+        
+        NotificationCenter.default.addObserver(forName: .toggleSwitcher, object: nil, queue: .main) { [weak self] _ in
+            self?.toggleSwitcher()
+        }
     }
     
     private func startMonitoringWindows() async {
@@ -42,12 +40,39 @@ final class AppState {
     }
     
     func toggleSwitcher() {
-        guard !isSwitcherVisible else { 
-            windowManager.hideSwitcher()
-            isSwitcherVisible = false
+        // 1. 权限检查
+        guard WindowEngine.checkAccessibilityPermission() else {
+            let alert = NSAlert()
+            alert.messageText = "Permissions Missing"
+            alert.informativeText = "DockSens needs Accessibility permissions."
+            alert.addButton(withTitle: "Open Settings")
+            alert.addButton(withTitle: "Cancel")
+            if alert.runModal() == .alertFirstButtonReturn {
+                let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!
+                NSWorkspace.shared.open(url)
+            }
             return
         }
-        windowManager.showSwitcher()
+
+        // 2. 切换逻辑
+        guard !isSwitcherVisible else { 
+            // 如果当前已经是显示状态，则触发隐藏
+            print("AppState: Toggle -> Hide")
+            windowManager.hideSwitcher()
+            // 注意：这里不需要手动设为 false，因为 hideSwitcher 会触发下面的 onWindowClose 回调
+            return
+        }
+        
+        print("AppState: Toggle -> Show")
+        // 手动设为 true，防止重复触发
         isSwitcherVisible = true
+        
+        // 3. 显示并监听关闭
+        windowManager.showSwitcher { [weak self] in
+            Task { @MainActor in
+                print("AppState: Switcher Closed (Callback Received)")
+                self?.isSwitcherVisible = false
+            }
+        }
     }
 }

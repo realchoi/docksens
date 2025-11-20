@@ -28,17 +28,25 @@ class SwitcherViewModel: ObservableObject, KeyboardInputDelegate {
     // MARK: - Public API
     
     func show(with windows: [WindowInfo], onSelect: @escaping (WindowInfo) -> Void) {
-        guard !windows.isEmpty else { return }
-        
         self.windows = windows
         self.selectionCallback = onSelect
-        self.selectedIndex = 0 // 默认选中第一个 (或者第二个，如果是 Alt-Tab 行为)
+        
+        // 默认选中第二个窗口 (符合 Alt-Tab 习惯：第一个通常是当前窗口)
+        // 如果只有一个窗口，则选中第一个
+        if windows.count > 1 {
+            self.selectedIndex = 1
+        } else {
+            self.selectedIndex = 0
+        }
         
         // 尝试启动键盘拦截
-        if inputManager.startMonitoring() {
-            withAnimation(.snappy) {
-                self.isVisible = true
-            }
+        // 即使失败也显示 UI，避免死锁
+        if !inputManager.startMonitoring() {
+            print("⚠️ SwitcherViewModel: Keyboard monitoring failed.")
+        }
+        
+        withAnimation(.snappy) {
+            self.isVisible = true
         }
     }
     
@@ -54,41 +62,40 @@ class SwitcherViewModel: ObservableObject, KeyboardInputDelegate {
     
     // MARK: - KeyboardInputDelegate
     
-    func handlenavigateLeft() {
-        // 必须在 MainActor 执行
-        Task { @MainActor in
-            guard !windows.isEmpty else { return }
-            if selectedIndex > 0 {
-                selectedIndex -= 1
-            } else {
-                selectedIndex = windows.count - 1 // 循环到末尾
-            }
+    func handleNavigateLeft() {
+        // 确保在主线程更新 UI
+        guard !windows.isEmpty else { return }
+        if selectedIndex > 0 {
+            selectedIndex -= 1
+        } else {
+            selectedIndex = windows.count - 1 // 循环到末尾
         }
     }
     
     func handleNavigateRight() {
-        Task { @MainActor in
-            guard !windows.isEmpty else { return }
-            if selectedIndex < windows.count - 1 {
-                selectedIndex += 1
-            } else {
-                selectedIndex = 0 // 循环到开头
-            }
+        guard !windows.isEmpty else { return }
+        if selectedIndex < windows.count - 1 {
+            selectedIndex += 1
+        } else {
+            selectedIndex = 0 // 循环到开头
         }
     }
     
     func handleSelect() {
-        Task { @MainActor in
-            guard windows.indices.contains(selectedIndex) else { return }
-            let selectedWindow = windows[selectedIndex]
-            hide()
-            selectionCallback?(selectedWindow)
+        // 防止重复触发：只有当窗口可见时才响应
+        guard isVisible else { return }
+        
+        guard windows.indices.contains(selectedIndex) else {
+            hide() // 没有任何选中项，直接关闭
+            return
         }
+        
+        let selectedWindow = windows[selectedIndex]
+        hide()
+        selectionCallback?(selectedWindow)
     }
     
     func handleCancel() {
-        Task { @MainActor in
-            hide()
-        }
+        hide()
     }
 }

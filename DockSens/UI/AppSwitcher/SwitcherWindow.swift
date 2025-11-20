@@ -7,17 +7,12 @@
 
 import SwiftUI
 import AppKit
+import ApplicationServices
 
 // MARK: - SwiftUI View
 
 struct SwitcherView: View {
     @ObservedObject var viewModel: SwitcherViewModel
-    
-    // 定义动画阶段
-    enum SelectionPhase: CaseIterable {
-        case identity // 原始状态
-        case selected // 选中高亮放大
-    }
     
     var body: some View {
         ZStack {
@@ -34,21 +29,15 @@ struct SwitcherView: View {
                                 window: window,
                                 isSelected: index == viewModel.selectedIndex
                             )
-                            // PhaseAnimator 魔法：只在选中的 Item 上触发
-                            .phaseAnimator([false, true], trigger: index == viewModel.selectedIndex) { content, phase in
-                                content
-                                    .scaleEffect(phase && index == viewModel.selectedIndex ? 1.05 : 1.0) // 选中时轻微放大
-                                    .offset(y: phase && index == viewModel.selectedIndex ? -4 : 0) // 选中时轻微上浮
-                            } animation: { phase in
-                                // 使用 snappy 弹簧动画让交互更灵动
-                                .snappy(duration: 0.3, extraBounce: 0.15) 
-                            }
+                            .scaleEffect(index == viewModel.selectedIndex ? 1.05 : 1.0)
+                            .offset(y: index == viewModel.selectedIndex ? -4 : 0)
+                            .animation(.snappy(duration: 0.2), value: viewModel.selectedIndex)
                         }
                     }
                     .padding(.horizontal, 20)
                 }
                 .padding(30)
-                .background(.thinMaterial) // 核心要求：薄材质背景
+                .background(.thinMaterial)
                 .clipShape(RoundedRectangle(cornerRadius: 24))
                 .overlay(
                     RoundedRectangle(cornerRadius: 24)
@@ -59,10 +48,6 @@ struct SwitcherView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        // 忽略鼠标点击背景关闭 (可选)
-        .onTapGesture {
-            // viewModel.hide()
-        }
     }
 }
 
@@ -72,41 +57,59 @@ struct WindowItemView: View {
     
     var body: some View {
         VStack(spacing: 12) {
-            // 图标/缩略图区域
             ZStack {
                 RoundedRectangle(cornerRadius: 12)
-                    .fill(isSelected ? Color.accentColor.opacity(0.15) : Color.clear)
+                    .fill(isSelected ? Color.accentColor.opacity(0.15) : Color.white.opacity(0.1))
                 
-                Image(systemName: "macwindow") // 占位符
-                    .font(.system(size: 48))
-                    .foregroundStyle(isSelected ? .primary : .secondary)
-                    .shadow(radius: isSelected ? 8 : 0)
+                if let cgImage = window.image {
+                    Image(decorative: cgImage, scale: 1.0)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .padding(8)
+                        .shadow(color: .black.opacity(0.3), radius: isSelected ? 6 : 2, x: 0, y: 4)
+                } else {
+                    Image(systemName: "macwindow")
+                        .font(.system(size: 48))
+                        .foregroundStyle(isSelected ? .primary : .secondary)
+                        .opacity(0.5)
+                }
                 
-                // 应用角标
-                if let appName = window.appName.first {
-                    Text(String(appName))
+                if let firstChar = window.appName.first {
+                    Text(String(firstChar))
                         .font(.system(size: 12, weight: .bold))
-                        .frame(width: 20, height: 20)
-                        .background(.white)
                         .foregroundStyle(.black)
+                        .frame(width: 24, height: 24)
+                        .background(Color.white)
                         .clipShape(Circle())
-                        .offset(x: 24, y: 24)
+                        .shadow(radius: 2)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+                        .padding([.bottom, .trailing], -8)
                 }
             }
-            .frame(width: 80, height: 80)
+            .frame(width: 180, height: 120)
             .overlay(
                 RoundedRectangle(cornerRadius: 12)
-                    .stroke(isSelected ? Color.accentColor : Color.clear, lineWidth: 2)
+                    .stroke(isSelected ? Color.accentColor : Color.white.opacity(0.1), lineWidth: isSelected ? 2 : 1)
             )
             
-            // 标题
-            Text(window.appName)
-                .font(.caption)
-                .fontWeight(isSelected ? .semibold : .regular)
-                .foregroundStyle(isSelected ? .primary : .secondary)
-                .lineLimit(1)
-                .frame(width: 80)
+            VStack(spacing: 2) {
+                Text(window.appName)
+                    .font(.subheadline)
+                    .fontWeight(isSelected ? .semibold : .medium)
+                    .foregroundStyle(isSelected ? .primary : .secondary)
+                
+                if !window.title.isEmpty && window.title != window.appName {
+                    Text(window.title)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary.opacity(0.8))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+            .frame(width: 180)
+            .lineLimit(1)
         }
+        .opacity(isSelected ? 1.0 : 0.8)
     }
 }
 
@@ -114,67 +117,133 @@ struct WindowItemView: View {
 
 @MainActor
 class SwitcherPanelController {
-    private var panel: NSPanel!
+    private var panel: NSPanel?
     private let viewModel = SwitcherViewModel()
+    var onClose: (() -> Void)?
     
-    init() {
-        setupPanel()
-    }
+    init() {}
     
-    private func setupPanel() {
-        // 创建全屏透明面板作为容器，确保居中显示
-        guard let screen = NSScreen.main else { return }
-        
-        panel = NSPanel(
+    private func createPanel() -> NSPanel {
+        guard let screen = NSScreen.main else { return NSPanel() }
+        let newPanel = NSPanel(
             contentRect: screen.frame,
             styleMask: [.nonactivatingPanel, .borderless],
             backing: .buffered,
             defer: false
         )
-        
-        // 关键设置
-        panel.level = .modalPanel // 比普通悬浮窗更高，模拟系统级 UI
-        panel.backgroundColor = .clear
-        panel.isOpaque = false
-        panel.hasShadow = false // 阴影由 SwiftUI 视图自己画
-        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        
-        // 嵌入 SwiftUI
-        let rootView = SwitcherView(viewModel: viewModel)
-        panel.contentView = NSHostingView(rootView: rootView)
+        newPanel.level = .modalPanel // 确保在最上层
+        newPanel.backgroundColor = .clear
+        newPanel.isOpaque = false
+        newPanel.hasShadow = false
+        newPanel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        return newPanel
     }
     
     func show(windows: [WindowInfo]) {
-        // 确保 Panel 覆盖全屏 (处理多显示器分辨率变化)
-        if let screen = NSScreen.main {
-            panel.setFrame(screen.frame, display: true)
+        if panel != nil {
+            panel?.orderOut(nil)
+            panel = nil
+        }
+        panel = createPanel()
+        guard let currentPanel = panel, let screen = NSScreen.main else { return }
+        
+        let rootView = SwitcherView(viewModel: viewModel)
+        let hostingView = NSHostingView(rootView: rootView.ignoresSafeArea())
+        
+        hostingView.translatesAutoresizingMaskIntoConstraints = true
+        hostingView.autoresizingMask = [.width, .height]
+        hostingView.sizingOptions = []
+        hostingView.frame = CGRect(origin: .zero, size: screen.frame.size)
+        
+        currentPanel.contentView = hostingView
+        
+        viewModel.show(with: windows) { [weak self] selectedWindow in
+            print("🎯 Selection Confirmed: \(selectedWindow.appName)")
+            
+            // ⚡️ 关键修复：
+            // 不要立即 hide()！否则焦点会瞬间回到上一个窗口（Window A），
+            // 导致我们接下来的激活操作（Activate B）被系统视为后台干扰。
+            // 我们先执行激活，等 B 准备好了，再撤掉 DockSens。
+            
+            Task {
+                await self?.performSequencedActivation(for: selectedWindow)
+                // 激活流程走完后，再隐藏面板，这样用户看到的就是 B 了
+                self?.hide()
+            }
         }
         
-        viewModel.show(with: windows) { selectedWindow in
-            print("User selected: \(selectedWindow.title)")
-            // TODO: 调用 WindowEngine 激活该窗口
-            self.activateWindow(selectedWindow)
-        }
-        
-        panel.orderFront(nil)
+        currentPanel.orderFront(nil)
     }
     
     func hide() {
+        guard panel != nil else { return }
         viewModel.hide()
-        // 动画结束后隐藏 Panel
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-            self.panel.orderOut(nil)
+        
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            self.panel?.orderOut(nil)
+            self.panel = nil
+            self.onClose?()
         }
     }
     
-    private func activateWindow(_ window: WindowInfo) {
-        // 简单实现：通过 NSRunningApplication 激活
-        // 实际上应该结合 AXUIElementRaise 来处理具体窗口以确保只有目标窗口前置
-        let app = NSWorkspace.shared.runningApplications.first(where: { $0.processIdentifier == window.pid })
+    // MARK: - Precision Activation Strategy
+    
+    private func performSequencedActivation(for window: WindowInfo) async {
+        guard let app = NSWorkspace.shared.runningApplications.first(where: { $0.processIdentifier == window.pid }) else {
+            return
+        }
         
-        // FIX: macOS 14+ 废弃了 .activateIgnoringOtherApps，且无效果。
-        // 直接调用 activate(options:)。由于此调用是在响应用户快捷键/点击，系统通常会允许前台激活。
-        // 使用 .activateAllWindows 确保应用的所有窗口都变为活跃状态（类似点击 Dock 图标的行为）
-        app?.activate(options: .activateAllWindows)
+        print("🚀 Step 1: Activate App \(window.appName)")
+        app.unhide()
+        app.activate(options: .activateAllWindows)
+        
+        // 稍微等待 App 响应激活指令
+        try? await Task.sleep(for: .milliseconds(50))
+        
+        print("🚀 Step 2: AX Raise Specific Window")
+        // 等待 AX 操作完成
+        await activateViaAX(window)
+    }
+    
+    private func activateViaAX(_ window: WindowInfo) async {
+        let pid = window.pid
+        let targetTitle = window.title
+        
+        // FIX: 使用 await ... .value 来等待 Task 执行完毕
+        await Task.detached {
+            let appRef = AXUIElementCreateApplication(pid)
+            var windowsRef: CFTypeRef?
+            
+            guard AXUIElementCopyAttributeValue(appRef, kAXWindowsAttribute as CFString, &windowsRef) == .success,
+                  let windowList = windowsRef as? [AXUIElement] else {
+                return
+            }
+            
+            // 精准匹配
+            var match: AXUIElement?
+            for axWindow in windowList {
+                var titleRef: CFTypeRef?
+                if AXUIElementCopyAttributeValue(axWindow, kAXTitleAttribute as CFString, &titleRef) == .success,
+                   let titleStr = titleRef as? String, titleStr == targetTitle {
+                    match = axWindow
+                    break
+                }
+            }
+            
+            let target = match ?? windowList.first
+            
+            if let finalWindow = target {
+                // 1. 提升层级 (Raise)
+                AXUIElementPerformAction(finalWindow, kAXRaiseAction as CFString)
+                
+                // 2. FIX: 修正 API 名称，设置为“主窗口” (Main)
+                AXUIElementSetAttributeValue(finalWindow, kAXMainAttribute as CFString, true as CFTypeRef)
+                
+                // 3. 尝试设置为“焦点窗口” (Focused) - 双重保险
+                AXUIElementSetAttributeValue(finalWindow, kAXFocusedAttribute as CFString, true as CFTypeRef)
+                
+                print("✅ AX Action Performed (Raise + Main + Focused)")
+            }
+        }.value
     }
 }

@@ -1,7 +1,43 @@
 {
   "sourceLanguage" : "en",
   "strings" : {
+    "%.1fs" : {
+
+    },
+    "%lld%%" : {
+
+    },
+    "All Set! You're ready to go." : {
+
+    },
+    "Behavior" : {
+
+    },
+    "Center" : {
+
+    },
+    "Core Features" : {
+
+    },
+    "Delay" : {
+
+    },
     "DockSens" : {
+
+    },
+    "DockSens is Running" : {
+
+    },
+    "DockSens needs these permissions to see your windows and provide previews." : {
+
+    },
+    "DockSens 正在运行" : {
+
+    },
+    "Enable" : {
+
+    },
+    "Experience window management at the speed of thought." : {
 
     },
     "General" : {
@@ -14,6 +50,15 @@
         }
       }
     },
+    "Get Started" : {
+
+    },
+    "Granted" : {
+
+    },
+    "Hover Delay" : {
+
+    },
     "Launch at Login" : {
       "localizations" : {
         "zh-Hans" : {
@@ -23,6 +68,9 @@
           }
         }
       }
+    },
+    "Maximize" : {
+
     },
     "NEW" : {
       "comment" : "Badge label for new features",
@@ -38,6 +86,24 @@
     "No Active Windows" : {
 
     },
+    "Open Settings" : {
+
+    },
+    "Permissions Required" : {
+
+    },
+    "Please grant permissions in System Settings" : {
+
+    },
+    "Press keys to record new shortcut." : {
+
+    },
+    "Preview Customization" : {
+
+    },
+    "Preview Size" : {
+
+    },
     "Pro" : {
       "localizations" : {
         "zh-Hans" : {
@@ -49,6 +115,7 @@
       }
     },
     "Quit" : {
+      "extractionState" : "stale",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
@@ -57,6 +124,9 @@
           }
         }
       }
+    },
+    "Reset All to Defaults" : {
+
     },
     "Restore Purchases" : {
       "extractionState" : "stale",
@@ -70,6 +140,7 @@
       }
     },
     "Settings" : {
+      "extractionState" : "stale",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
@@ -89,7 +160,31 @@
         }
       }
     },
-    "Shortcuts Placeholder" : {
+    "Show Dock Previews" : {
+
+    },
+    "Show the active window switcher" : {
+
+    },
+    "Split Left" : {
+
+    },
+    "Split Right" : {
+
+    },
+    "Start Using DockSens" : {
+
+    },
+    "Supercharge your macOS Dock with live window previews\nand powerful window management." : {
+
+    },
+    "Switch Window" : {
+
+    },
+    "The app is active in your menu bar.\nYou can safely close this window." : {
+
+    },
+    "Toggle Switcher" : {
 
     },
     "Toggle Window Switcher" : {
@@ -103,6 +198,9 @@
         }
       }
     },
+    "Unlock DockSens Pro" : {
+
+    },
     "Unlock Pro" : {
       "localizations" : {
         "zh-Hans" : {
@@ -112,6 +210,27 @@
           }
         }
       }
+    },
+    "Welcome to DockSens" : {
+
+    },
+    "Window Management" : {
+
+    },
+    "切换窗口" : {
+
+    },
+    "恢复预览" : {
+
+    },
+    "暂停预览" : {
+
+    },
+    "设置..." : {
+
+    },
+    "退出 DockSens" : {
+
     }
   },
   "version" : "1.0"

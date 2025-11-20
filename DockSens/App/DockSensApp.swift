@@ -11,76 +11,60 @@ import KeyboardShortcuts
 
 @main
 struct DockSensApp: App {
-    // 1. 全局单一数据源 (Source of Truth)
+    // 1. 全局状态
     @State private var appState = AppState()
     
-    // 2. 持久化存储：记录引导状态
+    // 2. 持久化设置
     @AppStorage("hasCompletedOnboarding") var hasCompletedOnboarding: Bool = false
-    
-    // 3. 预览开关状态 (与 GeneralSettingsView 共享同一个 Key)
     @AppStorage("showDockPreviews") private var showDockPreviews: Bool = true
     
+    // 3. 初始化：确保 App 启动时立即注册快捷键
+    init() {
+        setupShortcuts()
+    }
+    
     var body: some Scene {
-        // MARK: - Settings Window
-        // macOS 标准偏好设置窗口 (Cmd+,)
+        // 设置窗口
         Settings {
             SettingsView()
                 .environment(appState)
         }
         
-        // MARK: - Main Window (Onboarding / Status)
+        // 主窗口 (状态/引导)
         WindowGroup {
             Group {
                 if !hasCompletedOnboarding {
-                    // 引导流程：权限授予 -> 欢迎
                     OnboardingView()
                         .environment(appState)
                         .frame(minWidth: 700, minHeight: 500)
                 } else {
-                    // 引导完成后显示的简单状态页
                     StatusView()
                         .environment(appState)
-                        .onAppear {
-                            setupShortcuts()
-                        }
                 }
             }
         }
         .windowResizability(.contentSize)
+        // ❌ 注意：这里不再需要 .alert(...)，因为我们改用 NSAlert 在 AppState 中直接弹窗
         
-        // MARK: - Menu Bar Item
+        // 菜单栏图标
         MenuBarExtra("DockSens", systemImage: "macwindow.on.rectangle") {
-            // 1. 状态指示
-            Button("DockSens 正在运行") { }
-                .disabled(true)
-            
+            Button("DockSens 正在运行") { }.disabled(true)
             Divider()
-            
-            // 2. 快速开关
             Button {
                 showDockPreviews.toggle()
             } label: {
                 Text(showDockPreviews ? "暂停预览" : "恢复预览")
             }
-            
-            // 3. 窗口切换器
             Button("切换窗口") {
-                Task { @MainActor in
-                    appState.toggleSwitcher()
-                }
+                // 通过 Task 触发 MainActor 方法
+                Task { @MainActor in appState.toggleSwitcher() }
             }
-            
             Divider()
-            
-            // 4. 打开设置
             Button("设置...") {
                 NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
                 NSApp.activate(ignoringOtherApps: true)
             }
-            
             Divider()
-            
-            // 5. 退出应用 (修复：确保此按钮始终可见)
             Button("退出 DockSens") {
                 NSApplication.shared.terminate(nil)
             }
@@ -88,33 +72,23 @@ struct DockSensApp: App {
         }
     }
     
-    // MARK: - Logic
-    
-    /// 初始化全局快捷键监听
+    // 静态注册方法
     private func setupShortcuts() {
         KeyboardShortcuts.onKeyUp(for: .toggleSwitcher) {
+            // 监听到快捷键 -> 发送通知 -> AppState 响应
             Task { @MainActor in
-                appState.toggleSwitcher()
+                NotificationCenter.default.post(name: .toggleSwitcher, object: nil)
             }
-        }
-        
-        KeyboardShortcuts.onKeyUp(for: .splitLeft) {
-            print("Shortcut: Split Left Triggered")
-        }
-        
-        KeyboardShortcuts.onKeyUp(for: .splitRight) {
-            print("Shortcut: Split Right Triggered")
-        }
-        
-        KeyboardShortcuts.onKeyUp(for: .maximizeWindow) {
-            print("Shortcut: Maximize Triggered")
         }
     }
 }
 
-// MARK: - Helper Views
+// 定义通知名称
+extension Notification.Name {
+    static let toggleSwitcher = Notification.Name("ToggleSwitcherRequest")
+}
 
-/// 简单的运行状态视图
+// StatusView 简单实现
 struct StatusView: View {
     @Environment(AppState.self) var appState
     
@@ -135,17 +109,8 @@ struct StatusView: View {
                     .multilineTextAlignment(.center)
             }
             
-            HStack {
-                Button("Open Settings") {
-                    NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
-                }
-                
-                if !appState.isPro {
-                    Button("Unlock Pro") {
-                         NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
-                    }
-                    .buttonStyle(.borderedProminent)
-                }
+            Button("Open Settings") {
+                NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
             }
             .padding(.top, 10)
         }
