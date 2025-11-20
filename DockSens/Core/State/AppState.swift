@@ -17,6 +17,7 @@ final class AppState {
     
     private let windowManager = WindowManager()
     private let storeService = StoreService()
+    private let windowSnapper = WindowSnapper()
     
     init() {
         Task { await startMonitoringWindows() }
@@ -79,6 +80,14 @@ final class AppState {
                 print("AppState: Switcher Closed (Callback Received)")
                 self?.isSwitcherVisible = false
             }
+        }
+    }
+    
+    // MARK: - Window Snapping
+    
+    func snapActiveWindow(to position: SnapPosition) {
+        Task {
+            await windowSnapper.snapActiveWindow(to: position)
         }
     }
 }

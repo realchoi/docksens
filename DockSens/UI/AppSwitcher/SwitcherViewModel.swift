@@ -8,14 +8,16 @@
 import Foundation
 import SwiftUI
 import Combine
+import Observation
 
 @MainActor
-class SwitcherViewModel: ObservableObject, KeyboardInputDelegate {
+@Observable
+class SwitcherViewModel: KeyboardInputDelegate {
     
     // MARK: - UI State
-    @Published var windows: [WindowInfo] = []
-    @Published var selectedIndex: Int = 0
-    @Published var isVisible: Bool = false
+    var windows: [WindowInfo] = []
+    var selectedIndex: Int = 0
+    var isVisible: Bool = false
     
     // MARK: - Dependencies
     private let inputManager = KeyboardInputManager()

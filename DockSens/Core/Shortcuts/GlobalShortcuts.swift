@@ -22,7 +22,7 @@ extension KeyboardShortcuts.Name {
     static let maximizeWindow = Self("maximizeWindow", default: .init(.return, modifiers: [.option, .command]))
     
     // 更多功能...
-    static let centerWindow = Self("centerWindow")
+    static let centerWindow = Self("centerWindow", default: .init(.downArrow, modifiers: [.option, .command]))
 }
 
 // MARK: - 2. App Intents 集成 (用于快捷指令/Siri)

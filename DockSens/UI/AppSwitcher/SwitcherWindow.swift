@@ -13,7 +13,7 @@ import UniformTypeIdentifiers
 // MARK: - SwiftUI View
 
 struct SwitcherView: View {
-    @ObservedObject var viewModel: SwitcherViewModel
+    var viewModel: SwitcherViewModel
     @AppStorage("previewSize") private var previewSize: Double = 1.0
     
     private let baseWidth: CGFloat = 160

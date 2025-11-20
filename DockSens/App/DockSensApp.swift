@@ -73,6 +73,30 @@ struct DockSensApp: App {
                 NotificationCenter.default.post(name: .toggleSwitcher, object: nil)
             }
         }
+        
+        KeyboardShortcuts.onKeyUp(for: .splitLeft) {
+            Task { @MainActor in
+                appState.snapActiveWindow(to: .left)
+            }
+        }
+        
+        KeyboardShortcuts.onKeyUp(for: .splitRight) {
+            Task { @MainActor in
+                appState.snapActiveWindow(to: .right)
+            }
+        }
+        
+        KeyboardShortcuts.onKeyUp(for: .maximizeWindow) {
+            Task { @MainActor in
+                appState.snapActiveWindow(to: .maximize)
+            }
+        }
+        
+        KeyboardShortcuts.onKeyUp(for: .centerWindow) {
+            Task { @MainActor in
+                appState.snapActiveWindow(to: .center)
+            }
+        }
     }
 }
 
