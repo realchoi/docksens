@@ -8,43 +8,88 @@
 import SwiftUI
 import AppKit
 import ApplicationServices
+import UniformTypeIdentifiers
 
-// MARK: - SwiftUI View (保持不变)
+// MARK: - SwiftUI View
 
 struct SwitcherView: View {
     @ObservedObject var viewModel: SwitcherViewModel
+    @AppStorage("previewSize") private var previewSize: Double = 1.0
+    
+    private let baseWidth: CGFloat = 160
+    private let baseHeight: CGFloat = 110
+    private let gridSpacing: CGFloat = 20
+    private let horizontalPadding: CGFloat = 25
+    private let maxContainerWidth: CGFloat = 1100
+    
+    @State private var contentHeight: CGFloat = 300
+    
+    private var calculatedGridWidth: CGFloat {
+        let count = viewModel.windows.count
+        if count == 0 { return 300 }
+        let itemWidth = baseWidth * previewSize
+        let maxCols = Int((maxContainerWidth - (horizontalPadding * 2) + gridSpacing) / (itemWidth + gridSpacing))
+        let actualCols = max(1, min(count, maxCols))
+        return CGFloat(actualCols) * itemWidth + CGFloat(actualCols - 1) * gridSpacing + (horizontalPadding * 2)
+    }
     
     var body: some View {
         ZStack {
             if viewModel.isVisible {
-                VStack(spacing: 24) {
+                VStack(spacing: 20) {
                     Text("Switch Window")
-                        .font(.title3)
-                        .fontWeight(.semibold)
+                        .font(.headline)
                         .foregroundStyle(.secondary)
+                        .padding(.top, 15)
                     
-                    HStack(spacing: 20) {
-                        ForEach(Array(viewModel.windows.enumerated()), id: \.element.id) { index, window in
-                            WindowItemView(
-                                window: window,
-                                isSelected: index == viewModel.selectedIndex
+                    GeometryReader { geometry in
+                        let maxAllowedHeight = (NSScreen.main?.frame.height ?? 900) * 0.85
+                        
+                        ScrollView(.vertical, showsIndicators: true) {
+                            LazyVGrid(
+                                columns: [
+                                    GridItem(.adaptive(minimum: baseWidth * previewSize, maximum: baseWidth * previewSize * 1.5), spacing: gridSpacing)
+                                ],
+                                spacing: gridSpacing
+                            ) {
+                                ForEach(Array(viewModel.windows.enumerated()), id: \.element.id) { index, window in
+                                    WindowItemView(
+                                        window: window,
+                                        isSelected: index == viewModel.selectedIndex,
+                                        scaleFactor: previewSize,
+                                        baseSize: CGSize(width: baseWidth, height: baseHeight)
+                                    )
+                                    .onTapGesture {
+                                        viewModel.selectedIndex = index
+                                        viewModel.handleSelect()
+                                    }
+                                }
+                            }
+                            .padding(.horizontal, horizontalPadding)
+                            .padding(.vertical, 25)
+                            .background(
+                                GeometryReader { geo -> Color in
+                                    DispatchQueue.main.async {
+                                        self.contentHeight = geo.size.height + 60
+                                    }
+                                    return Color.clear
+                                }
                             )
-                            .scaleEffect(index == viewModel.selectedIndex ? 1.05 : 1.0)
-                            .offset(y: index == viewModel.selectedIndex ? -4 : 0)
-                            .animation(.snappy(duration: 0.2), value: viewModel.selectedIndex)
                         }
+                        .frame(height: min(contentHeight, maxAllowedHeight))
                     }
-                    .padding(.horizontal, 20)
+                    .frame(height: min(contentHeight, (NSScreen.main?.frame.height ?? 900) * 0.85))
                 }
-                .padding(30)
+                .padding(.bottom, 10)
                 .background(.thinMaterial)
                 .clipShape(RoundedRectangle(cornerRadius: 24))
                 .overlay(
                     RoundedRectangle(cornerRadius: 24)
                         .stroke(.white.opacity(0.2), lineWidth: 1)
                 )
-                .shadow(color: .black.opacity(0.3), radius: 30, x: 0, y: 15)
-                .transition(.scale(scale: 0.95).combined(with: .opacity))
+                .shadow(color: .black.opacity(0.4), radius: 50, x: 0, y: 25)
+                .frame(width: calculatedGridWidth)
+                .transition(.opacity.combined(with: .scale(scale: 0.95)))
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -54,62 +99,106 @@ struct SwitcherView: View {
 struct WindowItemView: View {
     let window: WindowInfo
     let isSelected: Bool
+    let scaleFactor: Double
+    let baseSize: CGSize
+    
+    private var itemWidth: CGFloat { baseSize.width * scaleFactor }
+    private var itemHeight: CGFloat { baseSize.height * scaleFactor }
     
     var body: some View {
-        VStack(spacing: 12) {
+        VStack(spacing: 8) {
             ZStack {
                 RoundedRectangle(cornerRadius: 12)
-                    .fill(isSelected ? Color.accentColor.opacity(0.15) : Color.white.opacity(0.1))
+                    .fill(isSelected ? Color.accentColor.opacity(0.15) : Color.black.opacity(0.1))
                 
                 if let cgImage = window.image {
                     Image(decorative: cgImage, scale: 1.0)
                         .resizable()
                         .aspectRatio(contentMode: .fit)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .padding(8)
-                        .shadow(color: .black.opacity(0.3), radius: isSelected ? 6 : 2, x: 0, y: 4)
+                        .shadow(color: .black.opacity(0.3), radius: isSelected ? 5 : 2, x: 0, y: 3)
                 } else {
-                    Image(systemName: "macwindow")
-                        .font(.system(size: 48))
-                        .foregroundStyle(isSelected ? .primary : .secondary)
-                        .opacity(0.5)
-                }
-                
-                if let firstChar = window.appName.first {
-                    Text(String(firstChar))
-                        .font(.system(size: 12, weight: .bold))
-                        .foregroundStyle(.black)
-                        .frame(width: 24, height: 24)
-                        .background(Color.white)
-                        .clipShape(Circle())
-                        .shadow(radius: 2)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
-                        .padding([.bottom, .trailing], -8)
+                    VStack(spacing: 6) {
+                        Image(systemName: "macwindow.on.rectangle")
+                            .font(.system(size: 30 * scaleFactor))
+                            .foregroundStyle(.secondary.opacity(0.3))
+                        
+                        if window.isMinimized {
+                            Text("Minimized")
+                                .font(.system(size: 10))
+                                .foregroundStyle(.secondary.opacity(0.8))
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(.ultraThinMaterial)
+                                .clipShape(Capsule())
+                        }
+                    }
                 }
             }
-            .frame(width: 180, height: 120)
+            .frame(width: itemWidth, height: itemHeight)
             .overlay(
                 RoundedRectangle(cornerRadius: 12)
-                    .stroke(isSelected ? Color.accentColor : Color.white.opacity(0.1), lineWidth: isSelected ? 2 : 1)
+                    .stroke(isSelected ? Color.accentColor : .clear, lineWidth: 3)
             )
+            .overlay(alignment: .bottomTrailing) {
+                AppIconView(bundleID: window.bundleIdentifier, pid: window.pid)
+                    .frame(width: 32 * scaleFactor, height: 32 * scaleFactor)
+                    .shadow(radius: 3)
+                    .offset(x: -6, y: -6)
+            }
             
             VStack(spacing: 2) {
                 Text(window.appName)
-                    .font(.subheadline)
-                    .fontWeight(isSelected ? .semibold : .medium)
+                    .font(.system(size: 13 * scaleFactor, weight: isSelected ? .bold : .medium))
                     .foregroundStyle(isSelected ? .primary : .secondary)
                 
                 if !window.title.isEmpty && window.title != window.appName {
                     Text(window.title)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary.opacity(0.8))
+                        .font(.system(size: 11 * scaleFactor))
+                        .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .truncationMode(.middle)
                 }
             }
-            .frame(width: 180)
+            .frame(width: itemWidth + 20)
             .lineLimit(1)
         }
-        .opacity(isSelected ? 1.0 : 0.8)
+        .scaleEffect(isSelected ? 1.03 : 1.0)
+        .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isSelected)
+        .contentShape(Rectangle())
+    }
+}
+
+struct AppIconView: View {
+    let bundleID: String
+    let pid: pid_t
+    @State private var icon: NSImage?
+    
+    var body: some View {
+        Group {
+            if let nsImage = icon {
+                Image(nsImage: nsImage)
+                    .resizable()
+            } else {
+                Image(systemName: "app.fill")
+                    .foregroundStyle(.gray)
+            }
+        }
+        .onAppear {
+            if icon == nil { self.icon = getAppIcon() }
+        }
+    }
+    
+    private func getAppIcon() -> NSImage {
+        if !bundleID.isEmpty,
+           let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
+            return NSWorkspace.shared.icon(forFile: appURL.path)
+        }
+        if let app = NSRunningApplication(processIdentifier: pid), let icon = app.icon {
+            return icon
+        }
+        return NSWorkspace.shared.icon(for: .applicationBundle)
     }
 }
 
@@ -121,6 +210,9 @@ class SwitcherPanelController {
     private let viewModel = SwitcherViewModel()
     var onClose: (() -> Void)?
     
+    // 新增回调：当选择窗口时通知 Manager
+    var onSelect: ((WindowInfo) -> Void)?
+    
     init() {}
     
     private func createPanel() -> NSPanel {
@@ -131,7 +223,6 @@ class SwitcherPanelController {
             backing: .buffered,
             defer: false
         )
-        // Agent App 使用 .modalPanel 可以确保覆盖在大多数窗口之上
         newPanel.level = .modalPanel
         newPanel.backgroundColor = .clear
         newPanel.isOpaque = false
@@ -140,7 +231,28 @@ class SwitcherPanelController {
         return newPanel
     }
     
-    func show(windows: [WindowInfo]) {
+    // ⚡️ 签名更新：接收 onSelect 回调
+    func show(windows: [WindowInfo], onSelect: @escaping (WindowInfo) -> Void) {
+        self.onSelect = onSelect
+        
+        let flags = CGEventSource.flagsState(.hidSystemState)
+        let isOptionHeld = flags.contains(.maskAlternate)
+        
+        if !isOptionHeld {
+            if windows.count > 1 {
+                let targetIndex = 1
+                if windows.indices.contains(targetIndex) {
+                    let targetWindow = windows[targetIndex]
+                    Task {
+                        await self.activateWindowSafely(targetWindow)
+                        self.onSelect?(targetWindow) // 通知更新 MRU
+                        self.onClose?()
+                    }
+                    return
+                }
+            }
+        }
+        
         if panel != nil {
             panel?.orderOut(nil)
             panel = nil
@@ -160,10 +272,9 @@ class SwitcherPanelController {
         
         viewModel.show(with: windows) { [weak self] selectedWindow in
             guard let self = self else { return }
-            
-            // ⚡️ Agent App 激活流程：
             Task {
                 await self.activateWindowSafely(selectedWindow)
+                self.onSelect?(selectedWindow) // 通知更新 MRU
                 self.hide()
             }
         }
@@ -182,64 +293,92 @@ class SwitcherPanelController {
         }
     }
     
-    // MARK: - Activation Strategy
-    
     private func activateWindowSafely(_ window: WindowInfo) async {
-        guard let app = NSWorkspace.shared.runningApplications.first(where: { $0.processIdentifier == window.pid }) else {
-            return
-        }
+        guard let app = NSWorkspace.shared.runningApplications.first(where: { $0.processIdentifier == window.pid }) else { return }
         
-        print("🚀 Agent Activating: \(window.appName)")
-        
-        // 1. 确保 App 不是隐藏状态 (Agent 必须显式调用 unhide)
         app.unhide()
+        if #available(macOS 14.0, *) { NSApp.yieldActivation(to: app) }
         
-        // 2. 暴力激活
-        // Bit 0: activateIgnoringOtherApps (1 << 0)
-        // Bit 1: activateAllWindows (1 << 1)
         let rawOptions: UInt = (1 << 0) | (1 << 1)
         let options = NSApplication.ActivationOptions(rawValue: rawOptions)
-        
-        // Agent 拥有特权，调用此方法通常能成功抢占
         app.activate(options: options)
         
-        // 3. 等待 WindowServer 处理
         try? await Task.sleep(for: .milliseconds(50))
-        
-        // 4. AX 提升具体窗口
         await performAXRaise(window)
     }
     
     private func performAXRaise(_ window: WindowInfo) async {
         let pid = window.pid
-        let title = window.title
+        let targetTitle = window.title
+        let targetFrame = window.frame
         
-        await Task.detached {
+        await Task.detached { [weak self] in
+            guard let self = self else { return }
+            
             let appRef = AXUIElementCreateApplication(pid)
             var windowsRef: CFTypeRef?
             
-            guard AXUIElementCopyAttributeValue(appRef, kAXWindowsAttribute as CFString, &windowsRef) == .success,
-                  let windowList = windowsRef as? [AXUIElement] else {
-                return
-            }
+            guard self.getAXAttribute(appRef, kAXWindowsAttribute as String, ofType: [AXUIElement].self) != nil else { return }
+            
+            if AXUIElementCopyAttributeValue(appRef, kAXWindowsAttribute as CFString, &windowsRef) != .success { return }
+            guard let windowList = windowsRef as? [AXUIElement] else { return }
             
             let match = windowList.first { axWindow in
                 var titleRef: CFTypeRef?
+                // 1. 标题匹配
                 if AXUIElementCopyAttributeValue(axWindow, kAXTitleAttribute as CFString, &titleRef) == .success,
-                   let t = titleRef as? String {
-                    return t == title
+                   let t = titleRef as? String, t == targetTitle {
+                    
+                    // 2. 尺寸位置匹配 (放宽容差到 100，解决 "hit-or-miss")
+                    if let posValue = self.getAXAttribute(axWindow, kAXPositionAttribute as String, ofType: AXValue.self),
+                       let sizeValue = self.getAXAttribute(axWindow, kAXSizeAttribute as String, ofType: AXValue.self) {
+                        
+                        var pos = CGPoint.zero
+                        var size = CGSize.zero
+                        AXValueGetValue(posValue, .cgPoint, &pos)
+                        AXValueGetValue(sizeValue, .cgSize, &size)
+                        
+                        let axCenter = CGPoint(x: pos.x + size.width/2, y: pos.y + size.height/2)
+                        let targetCenter = CGPoint(x: targetFrame.midX, y: targetFrame.midY)
+                        let dist = hypot(axCenter.x - targetCenter.x, axCenter.y - targetCenter.y)
+                        
+                        // ⚡️ 优化：容差 100pt，确保即使 AX/SCK 坐标有偏差也能命中
+                        if dist < 100 { return true }
+                    } else {
+                        // 无法获取 Frame，但标题一致，认为匹配
+                        return true
+                    }
                 }
                 return false
             }
             
             if let targetWindow = match ?? windowList.first {
-                // A. Raise
+                // 最小化还原
+                var minimizedRef: CFTypeRef?
+                if AXUIElementCopyAttributeValue(targetWindow, kAXMinimizedAttribute as CFString, &minimizedRef) == .success,
+                   let minimized = minimizedRef as? Bool, minimized == true {
+                     AXUIElementSetAttributeValue(targetWindow, kAXMinimizedAttribute as CFString, false as CFTypeRef)
+                }
+                
+                // 激活
                 AXUIElementPerformAction(targetWindow, kAXRaiseAction as CFString)
-                // B. Main
                 AXUIElementSetAttributeValue(targetWindow, kAXMainAttribute as CFString, true as CFTypeRef)
-                // C. Focused
                 AXUIElementSetAttributeValue(targetWindow, kAXFocusedAttribute as CFString, true as CFTypeRef)
             }
         }.value
+    }
+    
+    nonisolated private func getAXAttribute<T>(_ element: AXUIElement, _ attribute: String, ofType type: T.Type) -> T? {
+        var value: CFTypeRef?
+        let result = AXUIElementCopyAttributeValue(element, attribute as CFString, &value)
+        if result == .success, let value = value {
+            if T.self == AXValue.self { return value as? T }
+            if T.self == String.self { return value as? T }
+            if T.self == [AXUIElement].self { return value as? T }
+            if T.self == Bool.self { return value as? T }
+            if T.self == URL.self { return value as? T }
+            return value as? T
+        }
+        return nil
     }
 }

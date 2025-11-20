@@ -12,18 +12,21 @@ import ScreenCaptureKit
 
 // MARK: - Data Models
 
-/// 窗口信息 (用于 Switcher)
 struct WindowInfo: Identifiable, Sendable {
-    let id: UInt32
+    // ⚡️ UI 唯一标识 (每次生成，解决渲染冲突)
+    let id: UUID
+    // ⚡️ 系统标识 (可能为 0，用于排序参考)
+    let windowID: UInt32
+    
     let pid: pid_t
     let title: String
     let appName: String
     let bundleIdentifier: String
     let frame: CGRect
     let image: CGImage?
+    let isMinimized: Bool
 }
 
-/// Dock 图标数据模型 (用于 Dock Hover)
 struct DockIconInfo: Identifiable, Sendable {
     let id: Int
     let title: String
@@ -31,129 +34,178 @@ struct DockIconInfo: Identifiable, Sendable {
     let url: URL?
 }
 
+private struct AXWindowData: Sendable {
+    let pid: pid_t
+    let title: String
+    let frame: CGRect
+    let isMinimized: Bool
+    let appName: String
+    let bundleID: String
+}
+
 // MARK: - Window Engine Actor
 
 actor WindowEngine {
     
-    // MARK: - 1. Window Scanning (Switcher / SCK)
+    // MARK: - 1. Window Scanning (AX-Driven with SCK-Enrichment)
     
-    /// 使用 ScreenCaptureKit 扫描，并过滤出有效的可激活窗口
     func activeWindows() async throws -> [WindowInfo] {
-        // 1. 获取 SCK 原始内容
-        let content = try await SCShareableContent.current
+        async let scWindowsTask = try? SCShareableContent.current.windows
         
-        // 2. 获取 NSWorkspace 的运行中 App 列表 (用于验证 PID 和排除 Ghost 窗口)
         let regularApps = NSWorkspace.shared.runningApplications
             .filter { $0.activationPolicy == .regular }
-            .reduce(into: [pid_t: NSRunningApplication]()) { $0[$1.processIdentifier] = $1 }
         
-        // 3. 获取当前进程 (DockSens) 的 PID，用于精准排除
         let selfPID = ProcessInfo.processInfo.processIdentifier
         
-        // 4. 过滤窗口
-        let validWindows = content.windows.filter { window in
-            // A. 基础过滤：排除屏幕外、不可见层级、极小窗口
-            guard window.isOnScreen,
-                  window.windowLayer == 0,
-                  window.frame.width > 10, window.frame.height > 10 else { return false }
-            
-            // B. ❌ 关键修复：绝对排除 DockSens 自身
-            // 如果不排除，DockSens 窗口会进入列表，导致 index 1 (第二个窗口) 变成 DockSens 自己，
-            // 从而破坏 "Alt-Tab 切换回上一个 App" 的逻辑。
-            guard let appPID = window.owningApplication?.processID,
-                  appPID != selfPID else {
-                return false
+        // 1. 获取 AX 语义窗口
+        let axWindows = await withTaskGroup(of: [AXWindowData].self) { group in
+            for app in regularApps {
+                if app.processIdentifier == selfPID { continue }
+                group.addTask {
+                    return self.fetchAXWindowData(for: app)
+                }
             }
-            
-            // C. Ghost PID 修复：确保该窗口归属于一个“常规 App”
-            guard let pid = window.owningApplication?.processID,
-                  regularApps[pid] != nil else {
-                return false
+            var allAX: [AXWindowData] = []
+            for await list in group {
+                allAX.append(contentsOf: list)
             }
-            
-            return true
+            return allAX
         }
         
-        // 5. 并发截图
-        return await withTaskGroup(of: WindowInfo?.self) { group in
-            for scWindow in validWindows {
+        let scWindows = await scWindowsTask ?? []
+        
+        // 2. 匹配合并
+        return await withTaskGroup(of: WindowInfo.self) { group in
+            for axWin in axWindows {
                 group.addTask {
-                    let filter = SCContentFilter(desktopIndependentWindow: scWindow)
-                    let config = SCStreamConfiguration()
-                    config.sourceRect = scWindow.frame
-                    config.width = Int(scWindow.frame.width)
-                    config.height = Int(scWindow.frame.height)
-                    config.showsCursor = false
+                    // 尝试匹配 SCK 窗口
+                    let match = scWindows.first { scWin in
+                        guard let scPID = scWin.owningApplication?.processID, scPID == axWin.pid else { return false }
+                        if scWin.windowLayer != 0 { return false }
+                        
+                        let scTitle = scWin.title ?? ""
+                        if !axWin.title.isEmpty && !scTitle.contains(axWin.title) {
+                             // 标题不匹配，继续检查
+                        }
+                        
+                        let axCenter = CGPoint(x: axWin.frame.midX, y: axWin.frame.midY)
+                        let scCenter = CGPoint(x: scWin.frame.midX, y: scWin.frame.midY)
+                        let distance = hypot(axCenter.x - scCenter.x, axCenter.y - scCenter.y)
+                        return distance < 50
+                    }
                     
-                    // 捕获异常防止单个窗口失败导致整体崩溃
-                    let image = try? await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
+                    var image: CGImage? = nil
+                    var sysID: UInt32 = 0 // 默认为 0
                     
-                    guard let pid = scWindow.owningApplication?.processID else { return nil }
+                    if let scMatch = match {
+                        sysID = scMatch.windowID
+                        if !axWin.isMinimized {
+                            let filter = SCContentFilter(desktopIndependentWindow: scMatch)
+                            let config = SCStreamConfiguration()
+                            config.showsCursor = false
+                            image = try? await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
+                        }
+                    }
                     
                     return WindowInfo(
-                        id: scWindow.windowID,
-                        pid: pid,
-                        title: scWindow.title ?? "",
-                        appName: scWindow.owningApplication?.applicationName ?? "Unknown",
-                        bundleIdentifier: scWindow.owningApplication?.bundleIdentifier ?? "",
-                        frame: scWindow.frame,
-                        image: image
+                        id: UUID(), // ⚡️ 每个窗口生成唯一 UUID
+                        windowID: sysID,
+                        pid: axWin.pid,
+                        title: axWin.title,
+                        appName: axWin.appName,
+                        bundleIdentifier: axWin.bundleID,
+                        frame: axWin.frame,
+                        image: image,
+                        isMinimized: axWin.isMinimized
                     )
                 }
             }
             
-            // 收集结果
-            var results: [WindowInfo] = []
-            for await result in group {
-                if let info = result {
-                    results.append(info)
-                }
+            var finalResults: [WindowInfo] = []
+            for await info in group {
+                finalResults.append(info)
             }
             
-            // 6. 恢复原始 Z-Order 排序 (SCK 返回的 windows 数组本身就是按 Z-Order 排序的)
-            // 这里先按 Z-Order 排好，后续 WindowManager 会再根据 MRU 调整顺序
-            return results.sorted { w1, w2 in
-                let idx1 = validWindows.firstIndex(where: { $0.windowID == w1.id }) ?? Int.max
-                let idx2 = validWindows.firstIndex(where: { $0.windowID == w2.id }) ?? Int.max
-                return idx1 < idx2
+            // 排序：优先按 SystemID (Z-Order 近似值) 倒序，没有 ID 的按 PID
+            // 这是一个初步排序，WindowManager 会进行 MRU 重排
+            return finalResults.sorted {
+                if $0.windowID != $1.windowID { return $0.windowID > $1.windowID }
+                return $0.pid < $1.pid
             }
         }
     }
     
-    // MARK: - 2. Dock Scanning (Hover / AX)
+    // MARK: - Accessibility Fetcher (nonisolated)
     
-    /// 扫描 Dock 栏图标布局
-    func scanDockIcons() -> [DockIconInfo] {
-        var icons: [DockIconInfo] = []
+    nonisolated private func fetchAXWindowData(for app: NSRunningApplication) -> [AXWindowData] {
+        let pid = app.processIdentifier
+        let appRef = AXUIElementCreateApplication(pid)
         
+        guard let windowsRef = getAXAttribute(appRef, kAXWindowsAttribute, ofType: [AXUIElement].self) else {
+            return []
+        }
+        
+        var results: [AXWindowData] = []
+        
+        for axWindow in windowsRef {
+            let title = getAXAttribute(axWindow, kAXTitleAttribute, ofType: String.self) ?? ""
+            if title.isEmpty { continue }
+            
+            var frame: CGRect = .zero
+            if let posValue = getAXAttribute(axWindow, kAXPositionAttribute, ofType: AXValue.self),
+               let sizeValue = getAXAttribute(axWindow, kAXSizeAttribute, ofType: AXValue.self) {
+                var pos = CGPoint.zero
+                var size = CGSize.zero
+                AXValueGetValue(posValue, .cgPoint, &pos)
+                AXValueGetValue(sizeValue, .cgSize, &size)
+                frame = CGRect(origin: pos, size: size)
+            }
+            
+            if frame.width < 20 || frame.height < 20 { continue }
+            
+            let isMinimized = getAXAttribute(axWindow, kAXMinimizedAttribute, ofType: Bool.self) ?? false
+            
+            let data = AXWindowData(
+                pid: pid,
+                title: title,
+                frame: frame,
+                isMinimized: isMinimized,
+                appName: app.localizedName ?? "Unknown",
+                bundleID: app.bundleIdentifier ?? ""
+            )
+            results.append(data)
+        }
+        
+        return results
+    }
+    
+    // MARK: - 2. Dock Scanning (保持不变)
+    
+    func scanDockIcons() -> [DockIconInfo] {
+        // ... (Dock Scanning 代码与之前相同，为了节省篇幅省略，请保留原有的 scanDockIcons 实现) ...
+        // 这里的代码没有变动，请直接使用之前的实现
+        var icons: [DockIconInfo] = []
         let dockApps = NSWorkspace.shared.runningApplications.filter { $0.bundleIdentifier == "com.apple.dock" }
         guard let dockApp = dockApps.first else { return [] }
-        
         let dockRef = AXUIElementCreateApplication(dockApp.processIdentifier)
-        
         guard let children = getAXAttribute(dockRef, kAXChildrenAttribute, ofType: [AXUIElement].self) else { return [] }
-        
         for child in children {
             let role = getAXAttribute(child, kAXRoleAttribute, ofType: String.self)
             if role == "AXList" {
                 guard let iconElements = getAXAttribute(child, kAXChildrenAttribute, ofType: [AXUIElement].self) else { continue }
-                
                 for iconRef in iconElements {
-                    if let info = extractDockIconInfo(iconRef) {
-                        icons.append(info)
-                    }
+                    if let info = extractDockIconInfo(iconRef) { icons.append(info) }
                 }
             }
         }
         return icons
     }
 
-    private func extractDockIconInfo(_ element: AXUIElement) -> DockIconInfo? {
+    nonisolated private func extractDockIconInfo(_ element: AXUIElement) -> DockIconInfo? {
+        // ... (保持不变) ...
         let title = getAXAttribute(element, kAXTitleAttribute, ofType: String.self) ?? "Unknown"
         let role = getAXAttribute(element, kAXRoleAttribute, ofType: String.self)
-        
         if role != "AXDockItem" { return nil }
-        
         var frame = CGRect.zero
         if let posValue = getAXAttribute(element, kAXPositionAttribute, ofType: AXValue.self),
            let sizeValue = getAXAttribute(element, kAXSizeAttribute, ofType: AXValue.self) {
@@ -163,28 +215,18 @@ actor WindowEngine {
             AXValueGetValue(sizeValue, .cgSize, &size)
             frame = CGRect(origin: pos, size: size)
         }
-        
         var url: URL? = nil
         if let urlString = getAXAttribute(element, kAXURLAttribute, ofType: String.self) {
             url = URL(string: urlString)
         } else if let urlRef = getAXAttribute(element, kAXURLAttribute, ofType: URL.self) {
             url = urlRef
         }
-
-        return DockIconInfo(
-            id: Int(frame.origin.x),
-            title: title,
-            frame: frame,
-            url: url
-        )
+        return DockIconInfo(id: Int(frame.origin.x), title: title, frame: frame, url: url)
     }
     
-    // MARK: - Helpers
-    
-    private func getAXAttribute<T>(_ element: AXUIElement, _ attribute: String, ofType type: T.Type) -> T? {
+    nonisolated private func getAXAttribute<T>(_ element: AXUIElement, _ attribute: String, ofType type: T.Type) -> T? {
         var value: CFTypeRef?
         let result = AXUIElementCopyAttributeValue(element, attribute as CFString, &value)
-        
         if result == .success, let value = value {
             if T.self == AXValue.self { return value as? T }
             if T.self == String.self { return value as? T }
@@ -195,8 +237,6 @@ actor WindowEngine {
         }
         return nil
     }
-    
-    // MARK: - Static Permissions
     
     nonisolated static func checkAccessibilityPermission() -> Bool {
         let promptKey = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String

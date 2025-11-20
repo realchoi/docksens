@@ -16,13 +16,13 @@ class WindowManager {
     private let engine = WindowEngine()
     private var windowContinuation: AsyncStream<[WindowInfo]>.Continuation?
     
-    // MARK: - MRU Tracking
-    // 历史记录栈：存放最近激活过的 App PID，越靠前越新
-    private var mruPIDs: [pid_t] = []
+    // MARK: - Window-Level MRU Tracking
+    // 使用 "PID-Title" 组合作为窗口的稳定指纹
+    private var mruSignatures: [String] = []
     private var observer: NSObjectProtocol?
     
     init() {
-        setupMRUTracking()
+        setupSystemObservation()
     }
     
     deinit {
@@ -33,45 +33,43 @@ class WindowManager {
     
     // MARK: - Public Methods
     
-    /// 显示 Alt-Tab 切换器
-    /// - Parameter onWindowClose: 当窗口关闭（无论是用户取消还是选中）时触发的回调
     func showSwitcher(onWindowClose: @escaping () -> Void) {
         print("WindowManager: Show Switcher requested")
         
         Task {
             do {
-                // 1. 获取原始数据 (基于 Z-Order)
-                // 注意：WindowEngine 已经排除了 DockSens 自身
                 let rawWindows = try await engine.activeWindows()
                 
-                // 2. 应用 MRU 排序算法
-                // 逻辑：如果在 mruPIDs 里，按 MRU 顺序排；如果不在，保持原有 Z-Order 并在最后
+                // ⚡️ 核心修复：基于窗口指纹的 MRU 排序
+                // 解决 "同 App 窗口连带" 问题
                 let sortedWindows = rawWindows.sorted { w1, w2 in
-                    let idx1 = mruPIDs.firstIndex(of: w1.pid) ?? Int.max
-                    let idx2 = mruPIDs.firstIndex(of: w2.pid) ?? Int.max
+                    let sig1 = self.signature(for: w1)
+                    let sig2 = self.signature(for: w2)
+                    
+                    let idx1 = mruSignatures.firstIndex(of: sig1) ?? Int.max
+                    let idx2 = mruSignatures.firstIndex(of: sig2) ?? Int.max
                     
                     if idx1 != idx2 {
-                        return idx1 < idx2 // MRU 优先 (index 越小越靠前)
+                        return idx1 < idx2 // 历史记录优先
                     } else {
-                        // 如果 App 相同或都不在 MRU 列表里，保持原始稳定性 (Z-Order)
-                        let rawIdx1 = rawWindows.firstIndex(where: {$0.id == w1.id}) ?? Int.max
-                        let rawIdx2 = rawWindows.firstIndex(where: {$0.id == w2.id}) ?? Int.max
-                        return rawIdx1 < rawIdx2
+                        // 如果都不在记录中，或者指纹相同，保持原始系统 Z-Order
+                        // 使用 stableID (windowID) 辅助排序，确保稳定性
+                        return w1.windowID > w2.windowID
                     }
                 }
                 
-                // 3. 初始化控制器
                 if switcherController == nil {
                     switcherController = SwitcherPanelController()
                 }
                 
-                // 4. 绑定关闭回调
                 switcherController?.onClose = {
                     onWindowClose()
                 }
                 
-                // 5. 显示 (使用排序后的窗口列表)
-                switcherController?.show(windows: sortedWindows)
+                // 传递 promoteWindow 回调：当用户选中窗口时，更新 MRU
+                switcherController?.show(windows: sortedWindows, onSelect: { [weak self] selectedWindow in
+                    self?.promoteWindow(selectedWindow)
+                })
                 
             } catch {
                 print("❌ WindowManager: Failed to fetch windows - \(error)")
@@ -81,7 +79,6 @@ class WindowManager {
     }
     
     func hideSwitcher() {
-        print("WindowManager: Hide Switcher requested")
         switcherController?.hide()
     }
     
@@ -103,50 +100,35 @@ class WindowManager {
     
     // MARK: - MRU Logic
     
-    private func setupMRUTracking() {
-        // 初始填充：把当前运行的 App 加进去，作为一个基准
-        mruPIDs = NSWorkspace.shared.runningApplications
-            .filter { $0.activationPolicy == .regular }
-            .map { $0.processIdentifier }
-        
-        // 监听 App 激活事件
-        observer = NSWorkspace.shared.notificationCenter.addObserver(
-            forName: NSWorkspace.didActivateApplicationNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] notification in
-            // ⚠️ 修复 Swift 6 警告：
-            // Notification 不是 Sendable，不能在 Task 闭包中直接捕获。
-            // 我们必须在 Task 外面（同步上下文中）先把需要的数据 (pid) 提取出来。
-            
-            guard let userInfo = notification.userInfo,
-                  let app = userInfo[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else {
-                return
-            }
-            
-            // 提取 pid (Int32 是 Sendable 的)
-            let pid = app.processIdentifier
-            
-            // 现在可以安全地开启 Task，只捕获 Sendable 的 pid 和 weak self
-            Task { @MainActor [weak self] in
-                self?.updateMRU(with: pid)
-            }
-        }
+    private func signature(for window: WindowInfo) -> String {
+        // 生成唯一指纹：PID + 标题
+        // 即使 Frame 变了，只要标题没变，我们认为是同一个逻辑窗口
+        return "\(window.pid)-\(window.title)"
     }
     
-    private func updateMRU(with pid: pid_t) {
-        // 排除 DockSens 自己，防止它干扰排序
-        if pid == ProcessInfo.processInfo.processIdentifier { return }
+    // 当用户在 DockSens 中明确选中一个窗口时调用
+    private func promoteWindow(_ window: WindowInfo) {
+        let sig = signature(for: window)
+        // 移除旧记录
+        mruSignatures.removeAll { $0 == sig }
+        // 插入队首
+        mruSignatures.insert(sig, at: 0)
         
-        // 算法：移除旧的，插入到队首
-        if let index = mruPIDs.firstIndex(of: pid) {
-            mruPIDs.remove(at: index)
+        // 限制长度
+        if mruSignatures.count > 50 {
+            mruSignatures = Array(mruSignatures.prefix(50))
         }
-        mruPIDs.insert(pid, at: 0)
         
-        // 限制列表长度，防止无限增长
-        if mruPIDs.count > 50 {
-            mruPIDs = Array(mruPIDs.prefix(50))
-        }
+        print("✅ Promoted Window: \(sig)")
+    }
+    
+    private func setupSystemObservation() {
+        // 监听 App 激活 (作为辅助 MRU 更新)
+        // 当用户通过 Dock 或 Cmd+Tab 切换 App 时，我们把该 App 的所有窗口指纹稍微提前，
+        // 但不破坏 DockSens 内部精细的窗口排序。
+        // 这里为了解决 Issue 2，我们**不再**在 App 激活时暴力重排整个 App 的窗口，
+        // 而是信任系统的 Z-Order 变化，只有用户明确操作时才更新 mruSignatures。
+        
+        // (代码保留但留空，避免 App 级别干扰 Window 级别排序)
     }
 }
