@@ -46,10 +46,12 @@ final class AppState {
         // 1. 权限检查
         guard WindowEngine.checkAccessibilityPermission() else {
             let alert = NSAlert()
-            alert.messageText = "Permissions Missing"
-            alert.informativeText = "DockSens needs Accessibility permissions."
-            alert.addButton(withTitle: "Open Settings")
-            alert.addButton(withTitle: "Cancel")
+            // 修改点：使用 String(localized:) 显式进行本地化
+            alert.messageText = String(localized: "Permissions Missing")
+            alert.informativeText = String(localized: "DockSens needs Accessibility permissions.")
+            alert.addButton(withTitle: String(localized: "Open Settings"))
+            alert.addButton(withTitle: String(localized: "Cancel"))
+            
             if alert.runModal() == .alertFirstButtonReturn {
                 if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
                     NSWorkspace.shared.open(url)

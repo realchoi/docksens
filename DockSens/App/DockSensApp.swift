@@ -88,20 +88,24 @@ struct DockSensMenu: View {
         Button {
             showDockPreviews.toggle()
         } label: {
-            Text(showDockPreviews ? "暂停预览" : "恢复预览")
+            // 修改点：使用英文 Key 以支持多语言
+            Text(showDockPreviews ? "Pause Previews" : "Resume Previews")
         }
-        Button("切换窗口") {
+        // 修改点：使用英文 Key
+        Button("Switch Window") {
             Task { @MainActor in appState.toggleSwitcher() }
         }
         Divider()
-        Button("设置...") {
+        // 修改点：使用英文 Key
+        Button("Settings...") {
             // ⚡️ 使用 openWindow 可靠地打开设置窗口
             openWindow(id: "settings")
             // Agent App 需要强行激活自己才能让窗口置顶
             NSApp.activate(ignoringOtherApps: true)
         }
         Divider()
-        Button("退出 DockSens") {
+        // 修改点：使用英文 Key
+        Button("Quit DockSens") {
             NSApplication.shared.terminate(nil)
         }
         .keyboardShortcut("q", modifiers: [.command])

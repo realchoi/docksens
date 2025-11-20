@@ -170,7 +170,8 @@ actor WindowEngine {
                 title: title,
                 frame: frame,
                 isMinimized: isMinimized,
-                appName: app.localizedName ?? "Unknown",
+                // 修改点：支持 "Unknown" 的本地化
+                appName: app.localizedName ?? String(localized: "Unknown"),
                 bundleID: app.bundleIdentifier ?? ""
             )
             results.append(data)
