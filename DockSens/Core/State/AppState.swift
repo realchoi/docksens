@@ -2,7 +2,7 @@
 //  AppState.swift
 //  DockSens
 //
-//  Created by DockSens Setup Script.
+//  Created by DockSens Team.
 //
 
 import SwiftUI
@@ -23,7 +23,10 @@ final class AppState {
         Task { await startMonitoringPurchases() }
         
         NotificationCenter.default.addObserver(forName: .toggleSwitcher, object: nil, queue: .main) { [weak self] _ in
-            self?.toggleSwitcher()
+            // ⚡️ 修复警告：显式使用 Task { @MainActor } 包裹调用
+            Task { @MainActor [weak self] in
+                self?.toggleSwitcher()
+            }
         }
     }
     
@@ -48,8 +51,9 @@ final class AppState {
             alert.addButton(withTitle: "Open Settings")
             alert.addButton(withTitle: "Cancel")
             if alert.runModal() == .alertFirstButtonReturn {
-                let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!
-                NSWorkspace.shared.open(url)
+                if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+                    NSWorkspace.shared.open(url)
+                }
             }
             return
         }
