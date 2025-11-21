@@ -13,23 +13,242 @@ import Observation
 final class AppState {
     var runningWindows: [WindowInfo] = []
     var isSwitcherVisible: Bool = false
-    var isPro: Bool = false 
-    
+    var isPro: Bool = false
+
     private let windowManager = WindowManager()
     private let storeService = StoreService()
     private let windowSnapper = WindowSnapper()
-    
+    private let windowActivator = WindowActivator()
+
+    // Dock 预览相关
+    private let dockHoverDetector: DockHoverDetector
+    private let dockPreviewPanel = DockPreviewPanelController()
+    private let windowEngine = WindowEngine()
+
+    // Dock 点击相关 (Stage 4)
+    private let dockClickDetector: DockClickDetector
+    private let dockWindowController = DockWindowController()
+
+    // 🔧 添加：跟踪最后点击时间，防止点击后立即显示预览
+    private var lastClickTime: Date = .distantPast
+
     init() {
+        // 初始化 DockHoverDetector（需要传入 engine）
+        self.dockHoverDetector = DockHoverDetector(engine: windowEngine)
+        // 初始化 DockClickDetector（需要传入 hoverDetector）
+        self.dockClickDetector = DockClickDetector(hoverDetector: dockHoverDetector)
+
         Task { await startMonitoringWindows() }
         Task { await startMonitoringPurchases() }
-        
+
         NotificationCenter.default.addObserver(forName: .toggleSwitcher, object: nil, queue: .main) { [weak self] _ in
             // ⚡️ 修复警告：显式使用 Task { @MainActor } 包裹调用
             Task { @MainActor [weak self] in
                 self?.toggleSwitcher()
             }
         }
+
+        // 启动 Dock 悬浮监听
+        startDockHoverMonitoring()
+
+        // 启动 Dock 点击监听 (Stage 4)
+        startDockClickMonitoring()
     }
+
+    // MARK: - Dock Preview Management
+
+    private func startDockHoverMonitoring() {
+        dockHoverDetector.startMonitoring()
+
+        // 使用轮询检测悬浮状态
+        Task { @MainActor in
+            var previousHoveredIcon: DockIconInfo? = nil
+
+            while true {
+                try? await Task.sleep(for: .milliseconds(100))
+
+                let currentIcon = dockHoverDetector.hoveredIcon
+
+                // 🔧 修复：检查是否在点击冷却时间内（1秒）
+                let timeSinceClick = Date().timeIntervalSince(lastClickTime)
+                if timeSinceClick < 1.0 {
+                    // 点击后 1 秒内不显示预览，避免显示正在最小化的窗口
+                    continue
+                }
+
+                if currentIcon?.id != previousHoveredIcon?.id {
+                    if let icon = currentIcon, dockHoverDetector.isHovering {
+                        // 开始悬浮在新图标上
+                        await showDockPreview(for: icon)
+                    } else {
+                        // 🔧 修复问题4：离开 Dock 时延迟隐藏，给用户时间移动到预览面板
+                        dockPreviewPanel.scheduleHide(delay: 0.3)
+                    }
+                    previousHoveredIcon = currentIcon
+                }
+            }
+        }
+    }
+
+    private func showDockPreview(for icon: DockIconInfo) async {
+        // 获取该应用的所有窗口
+        do {
+            let allWindows = try await windowEngine.activeWindows()
+
+            // 根据 bundleID 或 appName 过滤窗口
+            let appWindows = allWindows.filter { window in
+                // 尝试通过 URL 获取 bundleID
+                if let url = icon.url,
+                   let bundle = Bundle(url: url),
+                   let bundleID = bundle.bundleIdentifier {
+                    return window.bundleIdentifier == bundleID
+                }
+
+                // 降级：通过应用名称匹配
+                return window.appName == icon.title
+            }
+
+            // 🔧 修复：过滤掉最小化的窗口，避免显示旧的缩略图
+            let visibleWindows = appWindows.filter { !$0.isMinimized }
+
+            print("📱 DockPreview: 显示 \(icon.title) 的 \(visibleWindows.count) 个可见窗口（总共 \(appWindows.count) 个）")
+
+            // 🔧 修复问题1：只有当应用有可见窗口时才显示预览
+            guard !visibleWindows.isEmpty else {
+                print("⏭️ DockPreview: \(icon.title) 没有可见窗口，隐藏预览")
+                // 🔧 修复：隐藏之前的预览
+                dockPreviewPanel.hide()
+                return
+            }
+
+            // 显示预览面板
+            dockPreviewPanel.show(for: icon, windows: visibleWindows) { [weak self] window in
+                // 点击缩略图时激活窗口
+                Task { @MainActor in
+                    await self?.activateWindowFromPreview(window)
+                }
+            }
+        } catch {
+            print("⚠️ DockPreview: 获取窗口列表失败 - \(error)")
+            // 🔧 修复：发生错误时也隐藏预览
+            dockPreviewPanel.hide()
+        }
+    }
+
+    private func activateWindowFromPreview(_ window: WindowInfo) async {
+        print("🎯 激活窗口: \(window.title)")
+        await windowActivator.activateWindow(window)
+
+        // 激活后隐藏预览
+        dockPreviewPanel.hide()
+    }
+
+    // MARK: - Dock Click Management (Stage 4)
+
+    private func startDockClickMonitoring() {
+        dockClickDetector.startMonitoring()
+
+        // 使用轮询检测点击
+        Task { @MainActor in
+            var lastProcessedIconId: Int? = nil
+            var lastProcessTime: Date = .distantPast
+            var isProcessing = false // 🔧 添加处理标志
+
+            while true {
+                try? await Task.sleep(for: .milliseconds(50))
+
+                // 🔧 如果正在处理，跳过本次检测
+                if isProcessing {
+                    continue
+                }
+
+                if let clickedIcon = dockClickDetector.clickedIcon {
+
+                    // 🔧 修复：检查是否是新的点击
+                    let now = Date()
+                    let timeSinceLastProcess = now.timeIntervalSince(lastProcessTime)
+                    let isSameIcon = (clickedIcon.id == lastProcessedIconId)
+
+                    if isSameIcon && timeSinceLastProcess < 0.8 { // 🔧 增强：同一图标 800ms 防抖（原来是 500ms）
+                        print("⏭️ AppState: 同一图标点击过快，忽略 (\(String(format: "%.3f", timeSinceLastProcess))s)")
+                        continue
+                    }
+
+                    // 🔧 修复：不同图标也需要短暂防抖，避免误触
+                    if !isSameIcon && timeSinceLastProcess < 0.3 { // 🔧 增强：不同图标 300ms 防抖（原来是 200ms）
+                        print("⏭️ AppState: 切换图标过快，忽略 (\(String(format: "%.3f", timeSinceLastProcess))s)")
+                        continue
+                    }
+
+                    // 🔧 关键修复：立即标记为正在处理，并清除 clickedIcon
+                    isProcessing = true
+                    lastProcessedIconId = clickedIcon.id
+                    lastProcessTime = now
+                    dockClickDetector.clickedIcon = nil // 清除，避免重复检测
+
+                    print("🖱️ AppState: 检测到 Dock 点击 '\(clickedIcon.title)'")
+
+                    // 处理点击
+                    await handleDockClick(for: clickedIcon)
+
+                    // 处理完成
+                    isProcessing = false
+                }
+            }
+        }
+    }
+
+    private func handleDockClick(for icon: DockIconInfo) async {
+        // 🔧 关键修复：立即记录点击前的前台应用，避免被 macOS Dock 自动激活影响判断
+        let frontmostAppBeforeClick = NSWorkspace.shared.frontmostApplication
+        let frontmostPIDBeforeClick = frontmostAppBeforeClick?.processIdentifier ?? -1
+
+        print("📸 AppState: 点击前前台应用 PID=\(frontmostPIDBeforeClick)")
+
+        // 🔧 修复：更新最后点击时间，防止点击后立即显示预览
+        lastClickTime = Date()
+
+        // 🔧 修复问题2：点击时立即隐藏预览，避免显示最小化动画
+        dockPreviewPanel.hide()
+
+        // 🔧 修复：点击后暂停悬停检测，避免鼠标不动时立即显示预览
+        dockHoverDetector.pauseHoverDetection()
+
+        // 获取该应用的所有窗口
+        do {
+            let allWindows = try await windowEngine.activeWindows()
+
+            // 根据 bundleID 或 appName 过滤窗口
+            let appWindows = allWindows.filter { window in
+                // 尝试通过 URL 获取 bundleID
+                if let url = icon.url,
+                   let bundle = Bundle(url: url),
+                   let bundleID = bundle.bundleIdentifier {
+                    return window.bundleIdentifier == bundleID
+                }
+
+                // 降级：通过应用名称匹配
+                return window.appName == icon.title
+            }
+
+            print("🎯 AppState: 处理 '\(icon.title)' 的点击，窗口数量: \(appWindows.count)")
+
+            // 🔧 关键修复：传递点击前的前台应用 PID
+            await dockWindowController.handleDockClick(
+                for: icon,
+                windows: appWindows,
+                frontmostPIDBeforeClick: frontmostPIDBeforeClick
+            )
+
+            // 🔧 修复：不再自动刷新预览，让鼠标移动后自然触发
+            // 用户需要移动鼠标才会重新显示预览，避免点击后立即弹出
+
+        } catch {
+            print("⚠️ AppState: 处理 Dock 点击失败 - \(error)")
+        }
+    }
+
+    // MARK: - Existing Methods
     
     private func startMonitoringWindows() async {
         for await windows in windowManager.windowsStream() {

@@ -15,14 +15,18 @@ class DockHoverDetector: ObservableObject {
     // MARK: - Published State
     @Published var hoveredIcon: DockIconInfo? = nil
     @Published var isHovering: Bool = false
-    
+
     // MARK: - Private Properties
     private var eventMonitor: Any?
     private var cachedIcons: [DockIconInfo] = []
     private let engine: WindowEngine
-    
+
     // FIX: 使用 Task 替代 Timer，解决 Swift 6 "Reference to captured var self" 并发警告
     private var hoverTask: Task<Void, Never>?
+
+    // 🔧 修复：添加暂停状态，点击后暂停悬停检测
+    private var isPaused: Bool = false
+    private var lastMousePosition: CGPoint = .zero
     
     init(engine: WindowEngine) {
         self.engine = engine
@@ -52,25 +56,52 @@ class DockHoverDetector: ObservableObject {
         }
         hoverTask?.cancel()
     }
+
+    // 🔧 修复：暂停悬停检测（点击后调用）
+    func pauseHoverDetection() {
+        isPaused = true
+        lastMousePosition = NSEvent.mouseLocation
+        print("🔇 DockHoverDetector: 暂停悬停检测")
+    }
+
+    // 🔧 修复：恢复悬停检测（鼠标移动后自动调用）
+    private func resumeHoverDetection() {
+        isPaused = false
+        print("🔊 DockHoverDetector: 恢复悬停检测")
+    }
     
     // MARK: - Logic
     
     private func handleMouseMove(_ event: NSEvent) {
+        // 🔧 修复：如果暂停了，检查鼠标是否移动
+        if isPaused {
+            let currentPosition = NSEvent.mouseLocation
+            let distance = hypot(currentPosition.x - lastMousePosition.x, currentPosition.y - lastMousePosition.y)
+
+            // 如果鼠标移动超过 10pt，恢复悬停检测
+            if distance > 10 {
+                resumeHoverDetection()
+            } else {
+                // 鼠标没有移动足够的距离，继续暂停
+                return
+            }
+        }
+
         // 获取屏幕坐标 (Cocoa 坐标系，原点在左下角)
         guard let screen = NSScreen.main else { return }
         let mouseLocation = NSEvent.mouseLocation
         let screenHeight = screen.frame.height
-        
+
         // 翻转 Y 轴以匹配 AX 坐标 (Top-Left)
         let mousePointTopLeft = CGPoint(x: mouseLocation.x, y: screenHeight - mouseLocation.y)
-        
+
         // 简单的命中测试优化：首先检查 Y 轴是否在 Dock 区域
         // 假设 Dock 高度不超过 150pt
         if mousePointTopLeft.y < (screenHeight - 150) {
             if isHovering { resetHover() }
             return
         }
-        
+
         // 遍历缓存的图标进行命中测试
         if let hitIcon = cachedIcons.first(where: { $0.frame.contains(mousePointTopLeft) }) {
             if hoveredIcon?.id != hitIcon.id {
