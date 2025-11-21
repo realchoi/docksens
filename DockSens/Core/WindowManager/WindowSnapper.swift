@@ -16,19 +16,37 @@ enum SnapPosition {
     case center
 }
 
-actor WindowSnapper {
-    
+final class WindowSnapper {
+    // 防止重复触发的状态锁
+    private var isSnapping = false
+    private let lock = NSLock()
+
     func snapActiveWindow(to position: SnapPosition) {
-        // 1. 获取当前活跃窗口
-        guard let focusedWindow = getFocusedWindow() else {
-            print("WindowSnapper: No focused window found")
+        // 防止并发执行
+        lock.lock()
+        guard !isSnapping else {
+            lock.unlock()
             return
         }
-        
+        isSnapping = true
+        lock.unlock()
+
+        defer {
+            lock.lock()
+            isSnapping = false
+            lock.unlock()
+        }
+
+        // 1. 获取当前活跃窗口
+        guard let focusedWindow = getFocusedWindow() else {
+            print("⚠️ 无法获取焦点窗口")
+            return
+        }
+
         // 2. 获取当前窗口所在的屏幕
         guard let currentFrame = getWindowFrame(focusedWindow),
               let screen = getScreen(containing: currentFrame) else {
-            print("WindowSnapper: Could not determine screen for window")
+            print("⚠️ 无法获取窗口位置或屏幕")
             return
         }
         
@@ -66,110 +84,228 @@ actor WindowSnapper {
                 height: height
             )
         }
-        
-        // 5. 执行动画
-        animateWindow(focusedWindow, from: currentFrame, to: targetFrame)
-    }
-    
-    // MARK: - Animation Logic
-    
-    private func animateWindow(_ window: AXUIElement, from startRect: CGRect, to endRect: CGRect) {
-        let duration: TimeInterval = 0.2
-        let steps = 12 // 60fps * 0.2s
-        let stepDuration = duration / Double(steps)
-        
-        Task {
-            for i in 1...steps {
-                let progress = Double(i) / Double(steps)
-                let easedProgress = easeOutQuad(progress)
-                
-                let newX = startRect.origin.x + (endRect.origin.x - startRect.origin.x) * easedProgress
-                let newY = startRect.origin.y + (endRect.origin.y - startRect.origin.y) * easedProgress
-                let newW = startRect.width + (endRect.width - startRect.width) * easedProgress
-                let newH = startRect.height + (endRect.height - startRect.height) * easedProgress
-                
-                let intermediateRect = CGRect(x: newX, y: newY, width: newW, height: newH)
-                
-                // 使用 Robust 设置，但为了性能，中间帧可以只设置一次 Size/Pos
-                // 最后一帧必须 Robust
-                if i == steps {
-                    setWindowFrameRobust(window, to: intermediateRect)
-                } else {
-                    setWindowFrameFast(window, to: intermediateRect)
-                }
-                
-                try? await Task.sleep(for: .seconds(stepDuration))
-            }
-        }
-    }
-    
-    private func easeOutQuad(_ t: Double) -> Double {
-        return t * (2 - t)
+
+        // 取整目标坐标，避免浮点数导致的不精确
+        targetFrame = CGRect(
+            x: round(targetFrame.origin.x),
+            y: round(targetFrame.origin.y),
+            width: round(targetFrame.size.width),
+            height: round(targetFrame.size.height)
+        )
+
+        // 5. Rectangle 的完整策略：禁用 Enhanced UI，设置窗口，可选恢复
+        setWindowFrame(focusedWindow, to: targetFrame)
     }
     
     // MARK: - Accessibility Helpers
-    
+
+    private func getApplicationName(for window: AXUIElement) -> String? {
+        guard let app = getApplicationElement(for: window) else { return nil }
+
+        var titleValue: CFTypeRef?
+        let result = AXUIElementCopyAttributeValue(app, kAXTitleAttribute as CFString, &titleValue)
+
+        if result == .success, let title = titleValue as? String {
+            return title
+        }
+        return nil
+    }
+
     private func getFocusedWindow() -> AXUIElement? {
+        // 方法 1: 使用 NSWorkspace 获取当前活跃应用（最可靠）
+        if let runningApp = NSWorkspace.shared.frontmostApplication,
+           let pid = runningApp.processIdentifier as pid_t? {
+            let appElement = AXUIElementCreateApplication(pid)
+
+            // 尝试获取焦点窗口
+            var focusedWindow: CFTypeRef?
+            let windowResult = AXUIElementCopyAttributeValue(appElement, kAXFocusedWindowAttribute as CFString, &focusedWindow)
+
+            if windowResult == .success {
+                return (focusedWindow as! AXUIElement)
+            }
+
+            // 尝试获取主窗口
+            var mainWindow: CFTypeRef?
+            let mainResult = AXUIElementCopyAttributeValue(appElement, kAXMainWindowAttribute as CFString, &mainWindow)
+
+            if mainResult == .success {
+                return (mainWindow as! AXUIElement)
+            }
+
+            // 尝试获取所有窗口
+            var windowsRef: CFTypeRef?
+            let windowsResult = AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &windowsRef)
+
+            if windowsResult == .success,
+               let windows = windowsRef as? [AXUIElement],
+               !windows.isEmpty {
+                return windows.first
+            }
+
+            print("⚠️ 应用 \(runningApp.localizedName ?? "Unknown") 没有可访问的窗口")
+        }
+
+        // 方法 2: 传统的 Accessibility API 方法（备用）
         let systemWide = AXUIElementCreateSystemWide()
         var focusedApp: CFTypeRef?
-        
+
         let result = AXUIElementCopyAttributeValue(systemWide, kAXFocusedApplicationAttribute as CFString, &focusedApp)
-        guard result == .success, let app = focusedApp else { return nil }
-        
+        guard result == .success, let app = focusedApp else {
+            return nil
+        }
+
+        let appElement = app as! AXUIElement
+
+        // 尝试获取焦点窗口
         var focusedWindow: CFTypeRef?
-        let windowResult = AXUIElementCopyAttributeValue(app as! AXUIElement, kAXFocusedWindowAttribute as CFString, &focusedWindow)
-        
+        let windowResult = AXUIElementCopyAttributeValue(appElement, kAXFocusedWindowAttribute as CFString, &focusedWindow)
+
         if windowResult == .success {
             return (focusedWindow as! AXUIElement)
         }
+
+        // 尝试获取主窗口
+        var mainWindow: CFTypeRef?
+        let mainResult = AXUIElementCopyAttributeValue(appElement, kAXMainWindowAttribute as CFString, &mainWindow)
+
+        if mainResult == .success {
+            return (mainWindow as! AXUIElement)
+        }
+
+        // 获取所有窗口
+        var windowsRef: CFTypeRef?
+        let windowsResult = AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &windowsRef)
+
+        if windowsResult == .success,
+           let windows = windowsRef as? [AXUIElement],
+           let firstWindow = windows.first {
+            return firstWindow
+        }
+
         return nil
     }
     
     private func getWindowFrame(_ window: AXUIElement) -> CGRect? {
         var posValue: CFTypeRef?
         var sizeValue: CFTypeRef?
-        
+
         AXUIElementCopyAttributeValue(window, kAXPositionAttribute as CFString, &posValue)
         AXUIElementCopyAttributeValue(window, kAXSizeAttribute as CFString, &sizeValue)
-        
+
         guard let posRef = posValue, CFGetTypeID(posRef) == AXValueGetTypeID(),
               let sizeRef = sizeValue, CFGetTypeID(sizeRef) == AXValueGetTypeID() else { return nil }
-        
+
         let pos = posRef as! AXValue
         let size = sizeRef as! AXValue
-        
+
         var point = CGPoint.zero
         var rectSize = CGSize.zero
-        
+
         AXValueGetValue(pos, .cgPoint, &point)
         AXValueGetValue(size, .cgSize, &rectSize)
-        
+
         return CGRect(origin: point, size: rectSize)
     }
-    
-    private func setWindowFrameFast(_ window: AXUIElement, to rect: CGRect) {
-        setSize(window, size: rect.size)
-        setPosition(window, point: rect.origin)
+
+    private func getMinimumSize(_ window: AXUIElement) -> CGSize? {
+        var value: CFTypeRef?
+        let result = AXUIElementCopyAttributeValue(window, "AXMinSize" as CFString, &value)
+
+        guard result == .success,
+              let sizeValue = value,
+              CFGetTypeID(sizeValue) == AXValueGetTypeID() else {
+            return nil
+        }
+
+        var size = CGSize.zero
+        AXValueGetValue(sizeValue as! AXValue, .cgSize, &size)
+        return size
     }
-    
-    private func setWindowFrameRobust(_ window: AXUIElement, to rect: CGRect) {
-        setSize(window, size: rect.size)
-        setPosition(window, point: rect.origin)
-        setSize(window, size: rect.size)
+
+    private func getMaximumSize(_ window: AXUIElement) -> CGSize? {
+        var value: CFTypeRef?
+        let result = AXUIElementCopyAttributeValue(window, "AXMaxSize" as CFString, &value)
+
+        guard result == .success,
+              let sizeValue = value,
+              CFGetTypeID(sizeValue) == AXValueGetTypeID() else {
+            return nil
+        }
+
+        var size = CGSize.zero
+        AXValueGetValue(sizeValue as! AXValue, .cgSize, &size)
+        return size
     }
-    
-    private func setPosition(_ window: AXUIElement, point: CGPoint) {
+
+    // MARK: - Window Frame Setting
+
+    /// 检查窗口属性是否可设置
+    private func isAttributeSettable(_ element: AXUIElement, attribute: CFString) -> Bool {
+        var settable: DarwinBoolean = false
+        let result = AXUIElementIsAttributeSettable(element, attribute, &settable)
+        return result == .success && settable.boolValue
+    }
+
+    /// Rectangle 的完整策略：禁用 Enhanced UI，设置窗口，可选恢复
+    /// 这是防止应用窗口管理器干扰的关键
+    private func setWindowFrame(_ window: AXUIElement, to rect: CGRect) {
+        // 1. 检查窗口属性
+        let canSetSize = isAttributeSettable(window, attribute: kAXSizeAttribute as CFString)
+
+        // 2. 获取窗口的尺寸约束（对于不可调整大小的窗口）
+        var adjustedRect = rect
+        if !canSetSize {
+            if let minSize = getMinimumSize(window), let maxSize = getMaximumSize(window) {
+                adjustedRect.size.width = max(minSize.width, min(rect.size.width, maxSize.width))
+                adjustedRect.size.height = max(minSize.height, min(rect.size.height, maxSize.height))
+            }
+        }
+
+        // 3. 获取应用程序元素并保存 Enhanced UI 状态
+        let appElement = getApplicationElement(for: window)
+        var wasEnhancedUI: Bool? = nil
+
+        if let app = appElement {
+            wasEnhancedUI = getEnhancedUI(for: app)
+
+            // 4. 如果 Enhanced UI 已启用，则禁用它
+            if wasEnhancedUI == true {
+                setEnhancedUI(for: app, enabled: false)
+            }
+        }
+
+        // 5. 两步法设置窗口：Position -> Size
+        let _ = setPosition(window, point: adjustedRect.origin)
+        let sizeResult = setSize(window, size: adjustedRect.size)
+
+        // 6. 如果 Size 设置失败但窗口标记为可设置，尝试三步法
+        if sizeResult != .success && canSetSize {
+            let _ = setSize(window, size: adjustedRect.size)
+            let _ = setPosition(window, point: adjustedRect.origin)
+            let _ = setSize(window, size: adjustedRect.size)
+        }
+
+        // 7. 恢复 Enhanced UI
+        if wasEnhancedUI == true, let app = appElement {
+            setEnhancedUI(for: app, enabled: true)
+        }
+    }
+
+    private func setPosition(_ window: AXUIElement, point: CGPoint) -> AXError {
         var pt = point
         if let posValue = AXValueCreate(.cgPoint, &pt) {
-            AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, posValue)
+            return AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, posValue)
         }
+        return .failure
     }
-    
-    private func setSize(_ window: AXUIElement, size: CGSize) {
+
+    private func setSize(_ window: AXUIElement, size: CGSize) -> AXError {
         var sz = size
         if let sizeValue = AXValueCreate(.cgSize, &sz) {
-            AXUIElementSetAttributeValue(window, kAXSizeAttribute as CFString, sizeValue)
+            return AXUIElementSetAttributeValue(window, kAXSizeAttribute as CFString, sizeValue)
         }
+        return .failure
     }
     
     private func getScreen(containing rect: CGRect) -> NSScreen? {
@@ -178,5 +314,34 @@ actor WindowSnapper {
         let cocoaY = primaryHeight - (rect.origin.y + rect.height)
         let cocoaCenter = CGPoint(x: rect.midX, y: cocoaY + rect.height / 2)
         return NSScreen.screens.first { $0.frame.contains(cocoaCenter) } ?? NSScreen.main
+    }
+
+    // MARK: - Enhanced UI Handling (Rectangle's strategy)
+
+    /// 获取窗口所属的应用程序元素
+    private func getApplicationElement(for window: AXUIElement) -> AXUIElement? {
+        var appRef: CFTypeRef?
+        let result = AXUIElementCopyAttributeValue(window, kAXParentAttribute as CFString, &appRef)
+
+        if result == .success, let app = appRef {
+            return (app as! AXUIElement)
+        }
+        return nil
+    }
+
+    /// 获取应用程序的 Enhanced UI 状态
+    private func getEnhancedUI(for appElement: AXUIElement) -> Bool? {
+        var value: CFTypeRef?
+        let result = AXUIElementCopyAttributeValue(appElement, "AXEnhancedUserInterface" as CFString, &value)
+
+        if result == .success, let boolValue = value as? Bool {
+            return boolValue
+        }
+        return nil
+    }
+
+    /// 设置应用程序的 Enhanced UI 状态
+    private func setEnhancedUI(for appElement: AXUIElement, enabled: Bool) {
+        AXUIElementSetAttributeValue(appElement, "AXEnhancedUserInterface" as CFString, enabled as CFBoolean)
     }
 }

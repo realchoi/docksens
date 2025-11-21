@@ -15,14 +15,14 @@ import KeyboardShortcuts // 确保已添加 Swift Package Dependency
 extension KeyboardShortcuts.Name {
     // 窗口切换器 (Alt-Tab)
     static let toggleSwitcher = Self("toggleSwitcher", default: .init(.tab, modifiers: [.option]))
-    
-    // 窗口管理 (分屏)
-    static let splitLeft = Self("splitLeft", default: .init(.leftArrow, modifiers: [.option, .command]))
-    static let splitRight = Self("splitRight", default: .init(.rightArrow, modifiers: [.option, .command]))
-    static let maximizeWindow = Self("maximizeWindow", default: .init(.return, modifiers: [.option, .command]))
-    
+
+    // 窗口管理 (分屏) - 使用 Magnet 风格的 Control+Option 组合
+    static let splitLeft = Self("splitLeft", default: .init(.leftArrow, modifiers: [.control, .option]))
+    static let splitRight = Self("splitRight", default: .init(.rightArrow, modifiers: [.control, .option]))
+    static let maximizeWindow = Self("maximizeWindow", default: .init(.return, modifiers: [.control, .option]))
+
     // 更多功能...
-    static let centerWindow = Self("centerWindow", default: .init(.downArrow, modifiers: [.option, .command]))
+    static let centerWindow = Self("centerWindow", default: .init(.c, modifiers: [.control, .option]))
 }
 
 // MARK: - 2. App Intents 集成 (用于快捷指令/Siri)

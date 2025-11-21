@@ -84,10 +84,9 @@ final class AppState {
     }
     
     // MARK: - Window Snapping
-    
+
     func snapActiveWindow(to position: SnapPosition) {
-        Task {
-            await windowSnapper.snapActiveWindow(to: position)
-        }
+        // 同步调用，不使用 Task，避免并发问题
+        windowSnapper.snapActiveWindow(to: position)
     }
 }
