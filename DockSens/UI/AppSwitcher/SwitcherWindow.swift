@@ -48,7 +48,7 @@ struct SwitcherView: View {
                         ScrollView(.vertical, showsIndicators: true) {
                             LazyVGrid(
                                 columns: [
-                                    GridItem(.adaptive(minimum: baseWidth * previewSize, maximum: baseWidth * previewSize * 1.5), spacing: gridSpacing)
+                                    GridItem(.adaptive(minimum: baseWidth * previewSize, maximum: baseWidth * previewSize * 1.5), spacing: gridSpacing, alignment: .top)
                                 ],
                                 spacing: gridSpacing
                             ) {
