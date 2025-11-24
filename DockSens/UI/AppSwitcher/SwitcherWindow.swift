@@ -19,8 +19,8 @@ struct SwitcherView: View {
     private let baseWidth: CGFloat = 160
     private let baseHeight: CGFloat = 110
     private let gridSpacing: CGFloat = 20
-    private let horizontalPadding: CGFloat = 25
-    private let maxContainerWidth: CGFloat = 1100
+    private let horizontalPadding: CGFloat = 40
+    private let maxContainerWidth: CGFloat = (NSScreen.main?.frame.width ?? 1400) * 0.9
     
     @State private var contentHeight: CGFloat = 300
     
@@ -44,26 +44,19 @@ struct SwitcherView: View {
                     
                     GeometryReader { geometry in
                         let maxAllowedHeight = (NSScreen.main?.frame.height ?? 900) * 0.85
+                        let availableWidth = min(geometry.size.width, maxContainerWidth) - (horizontalPadding * 2)
                         
                         ScrollView(.vertical, showsIndicators: true) {
-                            LazyVGrid(
-                                columns: [
-                                    GridItem(.adaptive(minimum: baseWidth * previewSize, maximum: baseWidth * previewSize * 1.5), spacing: gridSpacing, alignment: .top)
-                                ],
+                            // 自适应 Flow Layout
+                            AdaptiveWindowGrid(
+                                windows: viewModel.windows,
+                                selectedIndex: viewModel.selectedIndex,
+                                availableWidth: availableWidth,
+                                itemHeight: baseHeight * previewSize,
                                 spacing: gridSpacing
-                            ) {
-                                ForEach(Array(viewModel.windows.enumerated()), id: \.element.id) { index, window in
-                                    WindowItemView(
-                                        window: window,
-                                        isSelected: index == viewModel.selectedIndex,
-                                        scaleFactor: previewSize,
-                                        baseSize: CGSize(width: baseWidth, height: baseHeight)
-                                    )
-                                    .onTapGesture {
-                                        viewModel.selectedIndex = index
-                                        viewModel.handleSelect()
-                                    }
-                                }
+                            ) { index, window in
+                                viewModel.selectedIndex = index
+                                viewModel.handleSelect()
                             }
                             .padding(.horizontal, horizontalPadding)
                             .padding(.vertical, 25)
@@ -88,43 +81,123 @@ struct SwitcherView: View {
                         .stroke(.white.opacity(0.2), lineWidth: 1)
                 )
                 .shadow(color: .black.opacity(0.4), radius: 50, x: 0, y: 25)
-                .frame(width: calculatedGridWidth)
+                .frame(width: min(maxContainerWidth, max(400, calculatedWidth(windows: viewModel.windows))))
                 .transition(.opacity.combined(with: .scale(scale: 0.95)))
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+    
+    // 计算容器大致宽度 (用于初始 Frame)
+    private func calculatedWidth(windows: [WindowInfo]) -> CGFloat {
+        if windows.isEmpty { return 300 }
+        // 估算：假设平均宽高比 1.4
+        let avgWidth = baseHeight * previewSize * 1.4
+        let totalWidth = CGFloat(windows.count) * (avgWidth + gridSpacing) + (horizontalPadding * 2)
+        return min(totalWidth, maxContainerWidth)
+    }
+}
+
+// MARK: - Adaptive Layout Components
+
+struct AdaptiveWindowGrid: View {
+    let windows: [WindowInfo]
+    let selectedIndex: Int
+    let availableWidth: CGFloat
+    let itemHeight: CGFloat
+    let spacing: CGFloat
+    let onSelect: (Int, WindowInfo) -> Void
+    
+    var body: some View {
+        let rows = computeRows()
+        
+        VStack(alignment: .center, spacing: spacing) { // ⚡️ 居中对齐行
+            ForEach(rows.indices, id: \.self) { rowIndex in
+                HStack(alignment: .top, spacing: spacing) {
+                    ForEach(rows[rowIndex]) { item in
+                        WindowItemView(
+                            window: item.window,
+                            isSelected: item.globalIndex == selectedIndex,
+                            width: item.width,
+                            height: itemHeight
+                        )
+                        .onTapGesture {
+                            onSelect(item.globalIndex, item.window)
+                        }
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity) // ⚡️ 强制占满 ScrollView 宽度，确保居中对齐生效
+    }
+    
+    struct LayoutItem: Identifiable {
+        let id = UUID()
+        let window: WindowInfo
+        let globalIndex: Int
+        let width: CGFloat
+    }
+    
+    private func computeRows() -> [[LayoutItem]] {
+        var rows: [[LayoutItem]] = []
+        var currentRow: [LayoutItem] = []
+        var currentWidth: CGFloat = 0
+        
+        for (index, window) in windows.enumerated() {
+            // 根据宽高比计算宽度
+            let ratio = window.frame.height > 0 ? window.frame.width / window.frame.height : 1.0 // 默认 1.0 (正方形)
+            // 限制宽高比，防止过宽或过窄
+            let clampedRatio = max(0.8, min(ratio, 2.5))
+            let itemWidth = itemHeight * clampedRatio
+            
+            if !currentRow.isEmpty && (currentWidth + itemWidth + spacing > availableWidth) {
+                rows.append(currentRow)
+                currentRow = []
+                currentWidth = 0
+            }
+            
+            currentRow.append(LayoutItem(window: window, globalIndex: index, width: itemWidth))
+            currentWidth += itemWidth + spacing
+        }
+        
+        if !currentRow.isEmpty {
+            rows.append(currentRow)
+        }
+        
+        return rows
     }
 }
 
 struct WindowItemView: View {
     let window: WindowInfo
     let isSelected: Bool
-    let scaleFactor: Double
-    let baseSize: CGSize
-    
-    private var itemWidth: CGFloat { baseSize.width * scaleFactor }
-    private var itemHeight: CGFloat { baseSize.height * scaleFactor }
+    let width: CGFloat
+    let height: CGFloat
     
     var body: some View {
-        VStack(spacing: 8) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 12)
-                    .fill(isSelected ? Color.accentColor.opacity(0.15) : Color.black.opacity(0.1))
+        VStack(spacing: 4) {
+            ZStack(alignment: .center) {
+                // Background for selection - applied to entire container
+                if isSelected {
+                    RoundedRectangle(cornerRadius: 12)
+                        .fill(Color.accentColor.opacity(0.15))
+                }
                 
                 if let cgImage = window.image {
                     Image(decorative: cgImage, scale: 1.0)
                         .resizable()
                         .aspectRatio(contentMode: .fit)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .padding(8)
-                        .shadow(color: .black.opacity(0.3), radius: isSelected ? 5 : 2, x: 0, y: 3)
+                        .frame(width: width, height: height, alignment: .center)
+                        .shadow(color: .black.opacity(0.3), radius: isSelected ? 5 : 2, x: 0, y: 0)
                 } else {
+                    // 没有截图时显示大图标
                     VStack(spacing: 6) {
-                        Image(systemName: "macwindow.on.rectangle")
-                            .font(.system(size: 30 * scaleFactor))
-                            .foregroundStyle(.secondary.opacity(0.3))
+                        AppIconView(bundleID: window.bundleIdentifier, pid: window.pid)
+                            .frame(width: height, height: height)
+                            .shadow(radius: 4)
                         
-                        if window.isMinimized {
+                        // 仅当确实是最小化窗口时显示标签 (对于纯 App 图标不显示)
+                        if window.isMinimized && window.windowID != 0 {
                             Text("Minimized")
                                 .font(.system(size: 10))
                                 .foregroundStyle(.secondary.opacity(0.8))
@@ -134,35 +207,40 @@ struct WindowItemView: View {
                                 .clipShape(Capsule())
                         }
                     }
+                    .frame(width: width, height: height)
                 }
             }
-            .frame(width: itemWidth, height: itemHeight)
+            .frame(width: width, height: height)
+            .clipShape(RoundedRectangle(cornerRadius: 12))
             .overlay(
                 RoundedRectangle(cornerRadius: 12)
-                    .stroke(isSelected ? Color.accentColor : .clear, lineWidth: 3)
+                    .strokeBorder(isSelected ? Color.accentColor : .clear, lineWidth: 3)
             )
-            .overlay(alignment: .bottomTrailing) {
-                AppIconView(bundleID: window.bundleIdentifier, pid: window.pid)
-                    .frame(width: 32 * scaleFactor, height: 32 * scaleFactor)
-                    .shadow(radius: 3)
-                    .offset(x: -6, y: -6)
-            }
+            // Overlay removed: Icon moved to text area below
             
-            VStack(spacing: 2) {
-                Text(window.appName)
-                    .font(.system(size: 13 * scaleFactor, weight: isSelected ? .bold : .medium))
-                    .foregroundStyle(isSelected ? .primary : .secondary)
+            HStack(spacing: 8) {
+                // Icon moved here
+                AppIconView(bundleID: window.bundleIdentifier, pid: window.pid)
+                    .frame(width: 32, height: 32)
+                    .shadow(radius: 2)
                 
-                if !window.title.isEmpty && window.title != window.appName {
-                    Text(window.title)
-                        .font(.system(size: 11 * scaleFactor))
-                        .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(window.appName)
+                        .font(.system(size: 13, weight: isSelected ? .bold : .medium))
+                        .foregroundStyle(isSelected ? .primary : .secondary)
                         .lineLimit(1)
-                        .truncationMode(.middle)
+                    
+                    if !window.title.isEmpty && window.title != window.appName {
+                        Text(window.title)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
                 }
             }
-            .frame(width: itemWidth + 20)
-            .lineLimit(1)
+            .frame(width: width, alignment: .leading) // Align to thumbnail width
+            .padding(.leading, 6) // Adjust to align visually with rounded corners
         }
         .scaleEffect(isSelected ? 1.03 : 1.0)
         .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isSelected)

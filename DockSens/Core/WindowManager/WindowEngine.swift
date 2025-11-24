@@ -75,59 +75,126 @@ actor WindowEngine {
         let scWindows = await scWindowsTask ?? []
         
         // 2. 匹配合并
-        return await withTaskGroup(of: WindowInfo.self) { group in
-            for axWin in axWindows {
+        return await withTaskGroup(of: [WindowInfo].self) { group in
+            // 遍历所有应用，不仅仅是找到窗口的应用
+            for app in regularApps {
+                if app.processIdentifier == selfPID { continue }
+                
                 group.addTask {
-                    // 尝试匹配 SCK 窗口
-                    let match = scWindows.first { scWin in
-                        guard let scPID = scWin.owningApplication?.processID, scPID == axWin.pid else { return false }
-                        if scWin.windowLayer != 0 { return false }
-                        
-                        let scTitle = scWin.title ?? ""
-                        if !axWin.title.isEmpty && !scTitle.contains(axWin.title) {
-                             // 标题不匹配，继续检查
-                        }
-                        
-                        let axCenter = CGPoint(x: axWin.frame.midX, y: axWin.frame.midY)
-                        let scCenter = CGPoint(x: scWin.frame.midX, y: scWin.frame.midY)
-                        let distance = hypot(axCenter.x - scCenter.x, axCenter.y - scCenter.y)
-                        return distance < 50
+                    let appWindows = axWindows.filter { $0.pid == app.processIdentifier }
+                    
+                    // 如果该应用没有窗口，创建一个代表应用的“虚拟窗口”
+                    if appWindows.isEmpty {
+                        let dummyInfo = WindowInfo(
+                            id: UUID(),
+                            windowID: 0,
+                            pid: app.processIdentifier,
+                            title: app.localizedName ?? "App",
+                            appName: app.localizedName ?? "App",
+                            bundleIdentifier: app.bundleIdentifier ?? "",
+                            frame: CGRect(x: 0, y: 0, width: 100, height: 100), // 默认正方形
+                            image: nil,
+                            isMinimized: false
+                        )
+                        return [dummyInfo]
                     }
                     
-                    var image: CGImage? = nil
-                    var sysID: UInt32 = 0 // 默认为 0
+                    var appResults: [WindowInfo] = []
                     
-                    if let scMatch = match {
-                        sysID = scMatch.windowID
-                        if !axWin.isMinimized {
+                    for axWin in appWindows {
+                        // 尝试匹配 SCK 窗口
+                        let match = scWindows.first { scWin in
+                            guard let scPID = scWin.owningApplication?.processID, scPID == axWin.pid else { return false }
+                            if scWin.windowLayer != 0 { return false }
+                            
+                            // 1. 标题匹配
+                            let scTitle = scWin.title ?? ""
+                            if !axWin.title.isEmpty && !scTitle.isEmpty {
+                                if scTitle.contains(axWin.title) || axWin.title.contains(scTitle) {
+                                    return true
+                                }
+                            }
+                            
+                            // 2. 几何匹配
+                            let axCenter = CGPoint(x: axWin.frame.midX, y: axWin.frame.midY)
+                            let scCenter = CGPoint(x: scWin.frame.midX, y: scWin.frame.midY)
+                            let distance = hypot(axCenter.x - scCenter.x, axCenter.y - scCenter.y)
+                            
+                            if distance < 100 {
+                                let axArea = axWin.frame.width * axWin.frame.height
+                                let scArea = scWin.frame.width * scWin.frame.height
+                                if scArea > 0 && axArea > 0 {
+                                    let ratio = scArea / axArea
+                                    if ratio > 0.5 && ratio < 5.0 { return true }
+                                }
+                            }
+                            return false
+                        }
+                        
+                        var image: CGImage? = nil
+                        var sysID: UInt32 = 0
+                        
+                        if let scMatch = match {
+                            sysID = scMatch.windowID
+                            // 即使最小化也尝试截图 (SCK 可能能截取到，或者截取到图标)
                             let filter = SCContentFilter(desktopIndependentWindow: scMatch)
                             let config = SCStreamConfiguration()
                             config.showsCursor = false
-                            image = try? await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
+                            config.width = Int(scMatch.frame.width * 2)
+                            config.height = Int(scMatch.frame.height * 2)
+                            
+                            if let fullImage = try? await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config) {
+                                let axFrame = axWin.frame
+                                let scFrame = scMatch.frame
+                                
+                                if scFrame.width > 0, scFrame.height > 0 {
+                                    let scaleX = CGFloat(fullImage.width) / scFrame.width
+                                    let scaleY = CGFloat(fullImage.height) / scFrame.height
+                                    
+                                    let x = max(0, (axFrame.minX - scFrame.minX) * scaleX)
+                                    let topOffset = max(0, (axFrame.minY - scFrame.minY) * scaleY)
+                                    let w = min(CGFloat(fullImage.width) - x, axFrame.width * scaleX)
+                                    let h = min(CGFloat(fullImage.height) - topOffset, axFrame.height * scaleY)
+                                    let y = CGFloat(fullImage.height) - topOffset - h
+                                    
+                                    if w > 0 && h > 0 {
+                                        let cropRect = CGRect(x: x, y: y, width: w, height: h)
+                                        if let cropped = fullImage.cropping(to: cropRect) {
+                                            image = cropped
+                                        } else {
+                                            image = fullImage
+                                        }
+                                    } else {
+                                        image = fullImage
+                                    }
+                                } else {
+                                    image = fullImage
+                                }
+                            }
                         }
+                        
+                        appResults.append(WindowInfo(
+                            id: UUID(),
+                            windowID: sysID,
+                            pid: axWin.pid,
+                            title: axWin.title,
+                            appName: axWin.appName,
+                            bundleIdentifier: axWin.bundleID,
+                            frame: axWin.frame,
+                            image: image,
+                            isMinimized: axWin.isMinimized
+                        ))
                     }
-                    
-                    return WindowInfo(
-                        id: UUID(), // ⚡️ 每个窗口生成唯一 UUID
-                        windowID: sysID,
-                        pid: axWin.pid,
-                        title: axWin.title,
-                        appName: axWin.appName,
-                        bundleIdentifier: axWin.bundleID,
-                        frame: axWin.frame,
-                        image: image,
-                        isMinimized: axWin.isMinimized
-                    )
+                    return appResults
                 }
             }
             
             var finalResults: [WindowInfo] = []
-            for await info in group {
-                finalResults.append(info)
+            for await infos in group {
+                finalResults.append(contentsOf: infos)
             }
             
-            // 排序：优先按 SystemID (Z-Order 近似值) 倒序，没有 ID 的按 PID
-            // 这是一个初步排序，WindowManager 会进行 MRU 重排
+            // 排序：优先按 SystemID 倒序，没有 ID 的按 PID
             return finalResults.sorted {
                 if $0.windowID != $1.windowID { return $0.windowID > $1.windowID }
                 return $0.pid < $1.pid
