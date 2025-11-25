@@ -14,9 +14,11 @@ class DockClickDetector: ObservableObject {
 
     // MARK: - Published State
     @Published var clickedIcon: DockIconInfo? = nil
+    @Published var rightClickedIcon: DockIconInfo? = nil // 🔧 新增：右键点击状态
 
     // MARK: - Private Properties
-    private var eventMonitor: Any?
+    private var leftClickMonitor: Any?
+    private var rightClickMonitor: Any?
     private let hoverDetector: DockHoverDetector
 
     init(hoverDetector: DockHoverDetector) {
@@ -26,24 +28,34 @@ class DockClickDetector: ObservableObject {
     // MARK: - Public Methods
 
     func startMonitoring() {
-        // 注册全局鼠标点击监听
-        eventMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown]) { [weak self] event in
-            self?.handleMouseClick(event)
+        // 监听左键点击
+        leftClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
+            self?.handleClick(event, isRightClick: false)
+        }
+        
+        // 🔧 修复：监听右键点击，以便在打开 Dock 菜单时隐藏预览窗口
+        rightClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: .rightMouseDown) { [weak self] event in
+            self?.handleClick(event, isRightClick: true)
         }
         print("🖱️ DockClickDetector: 开始监听 Dock 点击事件")
     }
 
     func stopMonitoring() {
-        if let monitor = eventMonitor {
+        if let monitor = leftClickMonitor {
             NSEvent.removeMonitor(monitor)
-            eventMonitor = nil
+            leftClickMonitor = nil
+        }
+        // 移除右键监听
+        if let monitor = rightClickMonitor {
+            NSEvent.removeMonitor(monitor)
+            rightClickMonitor = nil
         }
         print("🖱️ DockClickDetector: 停止监听 Dock 点击事件")
     }
 
     // MARK: - Logic
 
-    private func handleMouseClick(_ event: NSEvent) {
+    private func handleClick(_ event: NSEvent, isRightClick: Bool) { // 重命名为 handleClick
         // 获取点击位置 (Cocoa 坐标系)
         guard let screen = NSScreen.main else { return }
         let clickLocation = NSEvent.mouseLocation
@@ -57,21 +69,18 @@ class DockClickDetector: ObservableObject {
             return // 不在 Dock 区域
         }
 
-        // 使用 hoverDetector 的缓存图标列表进行命中测试
-        // 注意：这里我们需要访问 DockHoverDetector 的 cachedIcons
-        // 由于 cachedIcons 是私有的，我们需要修改 DockHoverDetector 或使用另一种方式
-
         // 临时方案：直接扫描 Dock 图标
         Task {
             let icons = await scanDockIcons()
             if let hitIcon = icons.first(where: { $0.frame.contains(clickPointTopLeft) }) {
-                print("🎯 DockClickDetector: 检测到点击 Dock 图标 '\(hitIcon.title)'")
+                print("🎯 DockClickDetector: 检测到\(isRightClick ? "右键" : "左键")点击 Dock 图标 '\(hitIcon.title)'")
 
-                // 🔧 修复：设置 clickedIcon
-                self.clickedIcon = hitIcon
-
-                // 🔧 修复：不立即清除，让 AppState 有时间读取
-                // AppState 会在处理完后自动检测到下一次不同的点击
+                // 🔧 修复：根据点击类型设置不同的状态
+                if isRightClick {
+                    self.rightClickedIcon = hitIcon
+                } else {
+                    self.clickedIcon = hitIcon
+                }
             }
         }
     }

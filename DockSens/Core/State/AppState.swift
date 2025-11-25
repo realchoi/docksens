@@ -53,6 +53,11 @@ final class AppState {
 
         // 启动 Dock 点击监听 (Stage 4)
         startDockClickMonitoring()
+        
+        // 🔧 性能优化：当鼠标在预览窗口内时，暂停 Dock 悬浮检测
+        dockPreviewPanel.onHoverStateChanged = { [weak self] isHovering in
+            self?.dockHoverDetector.setExplicitlyPaused(isHovering)
+        }
     }
 
     // MARK: - Dock Preview Management
@@ -91,32 +96,33 @@ final class AppState {
     }
 
     private func showDockPreview(for icon: DockIconInfo) async {
+        // 1. 查找对应的运行中应用
+        guard let targetApp = findRunningApp(for: icon) else {
+            // print("⚠️ DockPreview: 找不到应用 \(icon.title)")
+            // 🔧 修复问题1：切换到无窗口应用时，必须隐藏之前的预览
+            dockPreviewPanel.hide()
+            return
+        }
+
         // 获取该应用的所有窗口
         do {
-            let allWindows = try await windowEngine.activeWindows()
+            // ⚡️ 性能优化：仅获取目标应用的窗口，避免全量扫描
+            let appWindows = try await windowEngine.windows(for: targetApp)
 
-            // 根据 bundleID 或 appName 过滤窗口
-            let appWindows = allWindows.filter { window in
-                // 尝试通过 URL 获取 bundleID
-                if let url = icon.url,
-                   let bundle = Bundle(url: url),
-                   let bundleID = bundle.bundleIdentifier {
-                    return window.bundleIdentifier == bundleID
-                }
-
-                // 降级：通过应用名称匹配
-                return window.appName == icon.title
+            // 过滤出真正有效的窗口（包括最小化窗口）
+            let visibleWindows = appWindows.filter { window in
+                // 1. 有实际的窗口 ID（不是虚拟窗口）
+                guard window.windowID > 0 else { return false }
+                // 2. 窗口有合理的尺寸
+                guard window.frame.width > 50 && window.frame.height > 50 else { return false }
+                return true
             }
 
-            // 🔧 修复：过滤掉最小化的窗口，避免显示旧的缩略图
-            let visibleWindows = appWindows.filter { !$0.isMinimized }
+            print("📱 DockPreview: 显示 \(icon.title) 的 \(visibleWindows.count) 个窗口（总共 \(appWindows.count) 个）")
 
-            print("📱 DockPreview: 显示 \(icon.title) 的 \(visibleWindows.count) 个可见窗口（总共 \(appWindows.count) 个）")
-
-            // 🔧 修复问题1：只有当应用有可见窗口时才显示预览
+            // 只有当应用有窗口时才显示预览
             guard !visibleWindows.isEmpty else {
-                print("⏭️ DockPreview: \(icon.title) 没有可见窗口，隐藏预览")
-                // 🔧 修复：隐藏之前的预览
+                print("⏭️ DockPreview: \(icon.title) 没有窗口，隐藏预览")
                 dockPreviewPanel.hide()
                 return
             }
@@ -133,6 +139,23 @@ final class AppState {
             // 🔧 修复：发生错误时也隐藏预览
             dockPreviewPanel.hide()
         }
+    }
+
+    // 辅助方法：查找对应的运行中应用
+    private func findRunningApp(for icon: DockIconInfo) -> NSRunningApplication? {
+        let apps = NSWorkspace.shared.runningApplications
+        
+        // 1. 尝试通过 URL 匹配 Bundle ID
+        if let url = icon.url,
+           let bundle = Bundle(url: url),
+           let bundleID = bundle.bundleIdentifier {
+            if let app = apps.first(where: { $0.bundleIdentifier == bundleID }) {
+                return app
+            }
+        }
+        
+        // 2. 尝试通过 Title 匹配 (降级方案)
+        return apps.first(where: { $0.localizedName == icon.title })
     }
 
     private func activateWindowFromPreview(_ window: WindowInfo) async {
@@ -159,6 +182,19 @@ final class AppState {
 
                 // 🔧 如果正在处理，跳过本次检测
                 if isProcessing {
+                    continue
+                }
+                
+                // 🔧 处理右键点击：隐藏预览窗口
+                if dockClickDetector.rightClickedIcon != nil {
+                    print("🖱️ AppState: 检测到右键点击，隐藏预览")
+                    dockPreviewPanel.hide()
+                    
+                    // 重置右键点击状态
+                    dockClickDetector.rightClickedIcon = nil
+                    
+                    // 暂停悬浮检测，避免干扰右键菜单
+                    dockHoverDetector.pauseHoverDetection()
                     continue
                 }
 

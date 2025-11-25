@@ -70,6 +70,19 @@ class DockHoverDetector: ObservableObject {
         print("🔊 DockHoverDetector: 恢复悬停检测")
     }
     
+    // 🔧 新增：允许外部显式控制暂停（用于预览窗口交互时）
+    func setExplicitlyPaused(_ paused: Bool) {
+        if paused {
+            isPaused = true
+            // 取消当前的悬停状态
+            resetHover()
+        } else {
+            isPaused = false
+            // 重置位置以避免立即触发自动恢复逻辑（如果需要）
+            lastMousePosition = NSEvent.mouseLocation
+        }
+    }
+    
     // MARK: - Logic
     
     private func handleMouseMove(_ event: NSEvent) {

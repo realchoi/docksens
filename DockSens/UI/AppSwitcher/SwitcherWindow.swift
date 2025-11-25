@@ -147,7 +147,8 @@ struct AdaptiveWindowGrid: View {
             // 根据宽高比计算宽度
             let ratio = window.frame.height > 0 ? window.frame.width / window.frame.height : 1.0 // 默认 1.0 (正方形)
             // 限制宽高比，防止过宽或过窄
-            let clampedRatio = max(0.8, min(ratio, 2.5))
+            // 🔧 优化：放宽限制 (0.6 - 3.0) 以减少留白，使容器更贴合实际窗口形状
+            let clampedRatio = max(0.6, min(ratio, 3.0))
             let itemWidth = itemHeight * clampedRatio
             
             if !currentRow.isEmpty && (currentWidth + itemWidth + spacing > availableWidth) {
@@ -187,6 +188,7 @@ struct WindowItemView: View {
                     Image(decorative: cgImage, scale: 1.0)
                         .resizable()
                         .aspectRatio(contentMode: .fit)
+                        .padding(6) // 🔧 优化：添加内边距，避免图片贴边溢出，增加呼吸感
                         .frame(width: width, height: height, alignment: .center)
                         .shadow(color: .black.opacity(0.3), radius: isSelected ? 5 : 2, x: 0, y: 0)
                 } else {
