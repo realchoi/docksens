@@ -18,8 +18,10 @@ class DockHoverDetector: ObservableObject {
 
     // MARK: - Private Properties
     private var eventMonitor: Any?
-    private var cachedIcons: [DockIconInfo] = []
-    private let engine: WindowEngine
+    // 移除本地 cachedIcons，改用 dockMonitor.icons
+    // private var cachedIcons: [DockIconInfo] = []
+    private let dockMonitor: DockMonitor
+    private var cancellables = Set<AnyCancellable>()
 
     // FIX: 使用 Task 替代 Timer，解决 Swift 6 "Reference to captured var self" 并发警告
     private var hoverTask: Task<Void, Never>?
@@ -28,18 +30,16 @@ class DockHoverDetector: ObservableObject {
     private var isPaused: Bool = false
     private var lastMousePosition: CGPoint = .zero
     
-    init(engine: WindowEngine) {
-        self.engine = engine
+    init(dockMonitor: DockMonitor) {
+        self.dockMonitor = dockMonitor
     }
     
     // MARK: - Public Methods
     
     func startMonitoring() {
-        // 1. 初始扫描布局 (这是一个耗时操作，实际应用应监听显示器变化来触发更新)
-        Task {
-            self.cachedIcons = await engine.scanDockIcons()
-            print("DockHoverDetector: Cached \(self.cachedIcons.count) icons")
-        }
+        // 1. 监听 DockMonitor 的图标更新
+        // 注意：这里不需要手动赋值 cachedIcons，直接在 handleMouseMove 中访问 dockMonitor.icons 即可
+        // 或者如果为了性能考虑，可以在这里订阅并更新本地缓存（但 DockMonitor 已经在 MainActor，直接访问很快）
         
         // 2. 注册全局鼠标移动监听
         // NSEvent.addGlobalMonitorForEvents 仅当 App 处于后台时生效
@@ -55,6 +55,7 @@ class DockHoverDetector: ObservableObject {
             eventMonitor = nil
         }
         hoverTask?.cancel()
+        cancellables.removeAll()
     }
 
     // 🔧 修复：暂停悬停检测（点击后调用）
@@ -115,13 +116,23 @@ class DockHoverDetector: ObservableObject {
             return
         }
 
-        // 遍历缓存的图标进行命中测试
-        if let hitIcon = cachedIcons.first(where: { $0.frame.contains(mousePointTopLeft) }) {
+        // 遍历 DockMonitor 的图标进行命中测试
+        // 直接使用 dockMonitor.icons，因为都在 MainActor 上
+        if let hitIcon = dockMonitor.icons.first(where: { $0.frame.contains(mousePointTopLeft) }) {
             if hoveredIcon?.id != hitIcon.id {
                 // 发现了新图标，启动防抖计时器
                 startHoverTimer(for: hitIcon)
             }
         } else {
+            // 🔧 修复：如果在 Dock 区域深处（例如底部 50pt）但没有匹配到图标，
+            // 可能是因为 Dock 布局改变（如放大）导致缓存失效。
+            // 此时强制刷新 DockMonitor。
+            if mousePointTopLeft.y > (screenHeight - 50) {
+                // 限制刷新频率，避免每帧都刷新
+                // DockMonitor.refresh() 内部已经有防抖，所以这里可以直接调用
+                dockMonitor.refresh()
+            }
+            
             resetHover()
         }
     }

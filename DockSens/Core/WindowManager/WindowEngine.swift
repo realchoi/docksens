@@ -10,9 +10,14 @@ import ApplicationServices
 import CoreGraphics
 import ScreenCaptureKit
 
+// ⚡️ Wrapper to make AXUIElement Sendable
+struct SendableAXUIElement: @unchecked Sendable {
+    let element: AXUIElement
+}
+
 // MARK: - Data Models
 
-struct WindowInfo: Identifiable, Sendable {
+struct WindowInfo: Identifiable, @unchecked Sendable {
     // ⚡️ UI 唯一标识 (每次生成，解决渲染冲突)
     let id: UUID
     // ⚡️ 系统标识 (可能为 0，用于排序参考)
@@ -25,6 +30,9 @@ struct WindowInfo: Identifiable, Sendable {
     let frame: CGRect
     let image: CGImage?
     let isMinimized: Bool
+    
+    // ⚡️ 缓存的 AXUIElement，用于 O(1) 操作
+    let axElement: SendableAXUIElement?
 }
 
 struct DockIconInfo: Identifiable, Sendable {
@@ -34,13 +42,14 @@ struct DockIconInfo: Identifiable, Sendable {
     let url: URL?
 }
 
-private struct AXWindowData: Sendable {
+private struct AXWindowData: @unchecked Sendable {
     let pid: pid_t
     let title: String
     let frame: CGRect
     let isMinimized: Bool
     let appName: String
     let bundleID: String
+    let axElement: SendableAXUIElement
 }
 
 // MARK: - Window Engine Actor
@@ -50,6 +59,9 @@ actor WindowEngine {
     // MARK: - Image Cache
     
     private let imageCache = WindowImageCache(maxSize: 50, maxAge: 2.5)
+    
+    // ⚡️ App AX 缓存
+    private let appAXCache = AppAXCache()
     
     // MARK: - 1. Window Scanning (AX-Driven with SCK-Enrichment)
     
@@ -66,7 +78,8 @@ actor WindowEngine {
             for app in regularApps {
                 if app.processIdentifier == selfPID { continue }
                 group.addTask {
-                    return self.fetchAXWindowData(for: app)
+                    // ⚡️ 传递缓存
+                    return self.fetchAXWindowData(for: app, using: self.appAXCache)
                 }
             }
             var allAX: [AXWindowData] = []
@@ -98,7 +111,8 @@ actor WindowEngine {
                             bundleIdentifier: app.bundleIdentifier ?? "",
                             frame: CGRect(x: 0, y: 0, width: 100, height: 100), // 默认正方形
                             image: nil,
-                            isMinimized: false
+                            isMinimized: false,
+                            axElement: nil
                         )
                         return [dummyInfo]
                     }
@@ -173,7 +187,8 @@ actor WindowEngine {
                             bundleIdentifier: axWin.bundleID,
                             frame: axWin.frame,
                             image: image,
-                            isMinimized: axWin.isMinimized
+                            isMinimized: axWin.isMinimized,
+                            axElement: axWin.axElement
                         ))
                     }
                     return appResults
@@ -208,7 +223,8 @@ actor WindowEngine {
         async let scWindowsTask = try? SCShareableContent.current.windows
         
         // 1. 仅获取目标应用的 AX 窗口
-        let axWindows = self.fetchAXWindowData(for: targetApp)
+        // ⚡️ 使用缓存
+        let axWindows = self.fetchAXWindowData(for: targetApp, using: self.appAXCache)
         
         let scWindows = await scWindowsTask ?? []
         
@@ -224,7 +240,8 @@ actor WindowEngine {
                 bundleIdentifier: targetApp.bundleIdentifier ?? "",
                 frame: CGRect(x: 0, y: 0, width: 100, height: 100),
                 image: nil,
-                isMinimized: false
+                isMinimized: false,
+                axElement: nil
             )
             return [dummyInfo]
         }
@@ -299,7 +316,8 @@ actor WindowEngine {
                 bundleIdentifier: axWin.bundleID,
                 frame: axWin.frame,
                 image: image,
-                isMinimized: axWin.isMinimized
+                isMinimized: axWin.isMinimized,
+                axElement: axWin.axElement
             ))
         }
         
@@ -321,9 +339,10 @@ actor WindowEngine {
     
     // MARK: - Accessibility Fetcher (nonisolated)
     
-    nonisolated private func fetchAXWindowData(for app: NSRunningApplication) -> [AXWindowData] {
+    nonisolated private func fetchAXWindowData(for app: NSRunningApplication, using cache: AppAXCache) -> [AXWindowData] {
         let pid = app.processIdentifier
-        let appRef = AXUIElementCreateApplication(pid)
+        // ⚡️ 使用缓存获取 App AX 对象
+        let appRef = cache.getElement(for: pid)
         
         guard let windowsRef = AXUtils.getAXAttribute(appRef, kAXWindowsAttribute, ofType: [AXUIElement].self) else {
             return []
@@ -356,7 +375,8 @@ actor WindowEngine {
                 isMinimized: isMinimized,
                 // 修改点：支持 "Unknown" 的本地化
                 appName: app.localizedName ?? String(localized: "Unknown"),
-                bundleID: app.bundleIdentifier ?? ""
+                bundleID: app.bundleIdentifier ?? "",
+                axElement: SendableAXUIElement(element: axWindow)
             )
             results.append(data)
         }
@@ -364,27 +384,49 @@ actor WindowEngine {
         return results
     }
     
-    // MARK: - 2. Dock Scanning (保持不变)
+    // MARK: - Fast State Checking
     
-    func scanDockIcons() -> [DockIconInfo] {
-        // ... (Dock Scanning 代码与之前相同，为了节省篇幅省略，请保留原有的 scanDockIcons 实现) ...
-        // 这里的代码没有变动，请直接使用之前的实现
-        var icons: [DockIconInfo] = []
-        let dockApps = NSWorkspace.shared.runningApplications.filter { $0.bundleIdentifier == "com.apple.dock" }
-        guard let dockApp = dockApps.first else { return [] }
-        let dockRef = AXUIElementCreateApplication(dockApp.processIdentifier)
-        guard let children = AXUtils.getAXAttribute(dockRef, kAXChildrenAttribute, ofType: [AXUIElement].self) else { return [] }
-        for child in children {
-            let role = AXUtils.getAXAttribute(child, kAXRoleAttribute, ofType: String.self)
-            if role == "AXList" {
-                guard let iconElements = AXUtils.getAXAttribute(child, kAXChildrenAttribute, ofType: [AXUIElement].self) else { continue }
-                for iconRef in iconElements {
-                    if let info = AXUtils.extractDockIconInfo(iconRef) { icons.append(info) }
-                }
-            }
+    /// 快速检查应用是否处于前台且有可见的焦点窗口
+    /// 用于 Dock 点击时的“最小化”判断
+    nonisolated func isAppFocusedAndVisible(pid: pid_t) -> Bool {
+        // 1. 检查是否是前台应用
+        guard let frontmost = NSWorkspace.shared.frontmostApplication,
+              frontmost.processIdentifier == pid else {
+            return false
         }
-        return icons
+        
+        // 2. 获取 AX 对象
+        let appRef = appAXCache.getElement(for: pid)
+        
+        // 3. 获取焦点窗口
+        var focusedWindowRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(appRef, kAXFocusedWindowAttribute as CFString, &focusedWindowRef) == .success else {
+            return false
+        }
+        let focusedWindow = focusedWindowRef as! AXUIElement
+        
+        // 4. 检查最小化状态
+        // 如果窗口被最小化，它通常不会是 FocusedWindow，或者 Minimized 属性为 true
+        if let isMinimized = AXUtils.getAXAttribute(focusedWindow, kAXMinimizedAttribute, ofType: Bool.self),
+           isMinimized {
+            return false
+        }
+        
+        // 5. 再次确认该窗口是否有效（有标题或大小）
+        // 有些应用可能有不可见的焦点窗口
+        if let sizeValue = AXUtils.getAXAttribute(focusedWindow, kAXSizeAttribute, ofType: AXValue.self) {
+            var size = CGSize.zero
+            AXValueGetValue(sizeValue, .cgSize, &size)
+            if size.width < 10 || size.height < 10 { return false }
+        }
+        
+        return true
     }
+    
+    // MARK: - 2. Dock Scanning
+    
+    // scanDockIcons 已移除，逻辑已迁移至 DockMonitor
+
 
     nonisolated static func checkAccessibilityPermission() -> Bool {
         return AXUtils.checkAccessibilityPermission()
@@ -392,6 +434,7 @@ actor WindowEngine {
     
     // 裁剪 CGImage 边缘的透明区域
     // ⚡️ 性能优化版：从边缘向内扫描，大幅减少遍历次数
+    // ⚡️ 二次优化：使用 Stride Skipping (跳步扫描) 加速初始探测
     nonisolated private func cropTransparentEdges(from image: CGImage) -> CGImage? {
         let width = image.width
         let height = image.height
@@ -417,17 +460,28 @@ actor WindowEngine {
         var minY = 0
         var maxY = height - 1
         
+        // ⚡️ 优化策略：
+        // 1. 粗略扫描：每隔 4 个像素检查一次 (stride = 4)
+        // 2. 精细修正：找到非透明点后，回溯查找精确边界
+        let stride = 4
+        
         // 1. 扫描 Top (minY)
         var foundTop = false
         for y in 0..<height {
-            for x in 0..<width {
+            // 快速扫描行
+            var rowHasContent = false
+            for x in Swift.stride(from: 0, to: width, by: stride) {
                 if !isTransparent(x, y) {
-                    minY = y
-                    foundTop = true
+                    rowHasContent = true
                     break
                 }
             }
-            if foundTop { break }
+            
+            if rowHasContent {
+                minY = y
+                foundTop = true
+                break
+            }
         }
         
         // 如果没找到顶部非透明像素，说明全是透明的
@@ -435,42 +489,59 @@ actor WindowEngine {
         
         // 2. 扫描 Bottom (maxY)
         for y in (minY..<height).reversed() {
-            var foundRow = false
-            for x in 0..<width {
+            var rowHasContent = false
+            for x in Swift.stride(from: 0, to: width, by: stride) {
                 if !isTransparent(x, y) {
-                    maxY = y
-                    foundRow = true
+                    rowHasContent = true
                     break
                 }
             }
-            if foundRow { break }
+            
+            if rowHasContent {
+                maxY = y
+                break
+            }
         }
         
         // 3. 扫描 Left (minX) - 仅在 minY...maxY 范围内扫描
-        var foundLeft = false
         for x in 0..<width {
-            for y in minY...maxY {
+            var colHasContent = false
+            // 纵向扫描也可以跳步
+            for y in Swift.stride(from: minY, to: maxY + 1, by: stride) {
                 if !isTransparent(x, y) {
-                    minX = x
-                    foundLeft = true
+                    colHasContent = true
                     break
                 }
             }
-            if foundLeft { break }
+            
+            if colHasContent {
+                minX = x
+                break
+            }
         }
         
         // 4. 扫描 Right (maxX) - 仅在 minY...maxY 范围内扫描
         for x in (minX..<width).reversed() {
-            var foundCol = false
-            for y in minY...maxY {
+            var colHasContent = false
+            for y in Swift.stride(from: minY, to: maxY + 1, by: stride) {
                 if !isTransparent(x, y) {
-                    maxX = x
-                    foundCol = true
+                    colHasContent = true
                     break
                 }
             }
-            if foundCol { break }
+            
+            if colHasContent {
+                maxX = x
+                break
+            }
         }
+        
+        // ⚡️ 精细修正：因为跳步扫描可能漏掉边界上的像素，稍微扩大边界以确保安全
+        // 或者进行局部回溯（这里为了性能，简单地向外扩展 stride 大小，反正透明边缘多切一点少切一点影响不大）
+        minX = max(0, minX - stride)
+        maxX = min(width - 1, maxX + stride)
+        minY = max(0, minY - stride)
+        maxY = min(height - 1, maxY + stride)
         
         // 校验有效性
         guard minX <= maxX && minY <= maxY else { return nil }

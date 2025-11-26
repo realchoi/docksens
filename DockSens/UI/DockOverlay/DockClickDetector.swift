@@ -14,107 +14,88 @@ class DockClickDetector: ObservableObject {
 
     // MARK: - Published State
     @Published var clickedIcon: DockIconInfo? = nil
-    @Published var rightClickedIcon: DockIconInfo? = nil // 🔧 新增：右键点击状态
+    @Published var rightClickedIcon: DockIconInfo? = nil
+    
+    // 🔧 新增：分离按下和松开事件，用于解决最小化/恢复冲突
+    @Published var mouseDownIcon: DockIconInfo? = nil
+    @Published var mouseUpIcon: DockIconInfo? = nil
 
     // MARK: - Private Properties
-    private var leftClickMonitor: Any?
+    private var leftMouseDownMonitor: Any?
+    private var leftMouseUpMonitor: Any?
     private var rightClickMonitor: Any?
     private let hoverDetector: DockHoverDetector
+    private let dockMonitor: DockMonitor
 
-    init(hoverDetector: DockHoverDetector) {
+    init(hoverDetector: DockHoverDetector, dockMonitor: DockMonitor) {
         self.hoverDetector = hoverDetector
+        self.dockMonitor = dockMonitor
     }
 
     // MARK: - Public Methods
 
     func startMonitoring() {
-        // 监听左键点击
-        leftClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
-            self?.handleClick(event, isRightClick: false)
+        // 1. 监听左键按下 (用于判断意图)
+        leftMouseDownMonitor = NSEvent.addGlobalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
+            self?.handleLeftClick(event, phase: .down)
         }
         
-        // 🔧 修复：监听右键点击，以便在打开 Dock 菜单时隐藏预览窗口
+        // 2. 监听左键松开 (用于执行操作)
+        leftMouseUpMonitor = NSEvent.addGlobalMonitorForEvents(matching: .leftMouseUp) { [weak self] event in
+            self?.handleLeftClick(event, phase: .up)
+        }
+        
+        // 3. 监听右键点击
         rightClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: .rightMouseDown) { [weak self] event in
-            self?.handleClick(event, isRightClick: true)
+            self?.handleRightClick(event)
         }
         print("🖱️ DockClickDetector: 开始监听 Dock 点击事件")
     }
 
     func stopMonitoring() {
-        if let monitor = leftClickMonitor {
-            NSEvent.removeMonitor(monitor)
-            leftClickMonitor = nil
-        }
-        // 移除右键监听
-        if let monitor = rightClickMonitor {
-            NSEvent.removeMonitor(monitor)
-            rightClickMonitor = nil
-        }
+        if let monitor = leftMouseDownMonitor { NSEvent.removeMonitor(monitor); leftMouseDownMonitor = nil }
+        if let monitor = leftMouseUpMonitor { NSEvent.removeMonitor(monitor); leftMouseUpMonitor = nil }
+        if let monitor = rightClickMonitor { NSEvent.removeMonitor(monitor); rightClickMonitor = nil }
         print("🖱️ DockClickDetector: 停止监听 Dock 点击事件")
     }
 
     // MARK: - Logic
+    
+    private enum ClickPhase { case down, up }
 
-    private func handleClick(_ event: NSEvent, isRightClick: Bool) { // 重命名为 handleClick
-        // 获取点击位置 (Cocoa 坐标系)
-        guard let screen = NSScreen.main else { return }
-        let clickLocation = NSEvent.mouseLocation
-        let screenHeight = screen.frame.height
+    private func handleLeftClick(_ event: NSEvent, phase: ClickPhase) {
+        let clickPointTopLeft = getClickPoint(event)
+        guard isPointInDock(clickPointTopLeft) else { return }
 
-        // 转换为 Quartz 坐标系 (Top-Left)
-        let clickPointTopLeft = CGPoint(x: clickLocation.x, y: screenHeight - clickLocation.y)
-
-        // 检查是否在 Dock 区域 (底部 150pt)
-        if clickPointTopLeft.y < (screenHeight - 150) {
-            return // 不在 Dock 区域
-        }
-
-        // 临时方案：直接扫描 Dock 图标
-        Task {
-            let icons = await scanDockIcons()
-            if let hitIcon = icons.first(where: { $0.frame.contains(clickPointTopLeft) }) {
-                print("🎯 DockClickDetector: 检测到\(isRightClick ? "右键" : "左键")点击 Dock 图标 '\(hitIcon.title)'")
-
-                // 🔧 修复：根据点击类型设置不同的状态
-                if isRightClick {
-                    self.rightClickedIcon = hitIcon
-                } else {
-                    self.clickedIcon = hitIcon
-                }
+        if let hitIcon = dockMonitor.icons.first(where: { $0.frame.contains(clickPointTopLeft) }) {
+            // print("🎯 DockClickDetector: 左键 \(phase) '\(hitIcon.title)'")
+            if phase == .down {
+                self.mouseDownIcon = hitIcon
+            } else {
+                self.mouseUpIcon = hitIcon
+                // 兼容旧逻辑 (虽然 AppState 将主要使用 Up/Down，但为了保险保留 clickedIcon)
+                self.clickedIcon = hitIcon
             }
         }
     }
-
-    // 临时方案：扫描 Dock 图标
-    // TODO: 优化 - 复用 DockHoverDetector 的缓存
-    private func scanDockIcons() async -> [DockIconInfo] {
-        return await Task.detached {
-            var icons: [DockIconInfo] = []
-
-            let dockApps = NSWorkspace.shared.runningApplications.filter {
-                $0.bundleIdentifier == "com.apple.dock"
-            }
-            guard let dockApp = dockApps.first else { return [] }
-
-            let dockRef = AXUIElementCreateApplication(dockApp.processIdentifier)
-            guard let children = AXUtils.getAXAttribute(dockRef, kAXChildrenAttribute, ofType: [AXUIElement].self) else {
-                return []
-            }
-
-            for child in children {
-                let role = AXUtils.getAXAttribute(child, kAXRoleAttribute, ofType: String.self)
-                if role == "AXList" {
-                    guard let iconElements = AXUtils.getAXAttribute(child, kAXChildrenAttribute, ofType: [AXUIElement].self) else {
-                        continue
-                    }
-                    for iconRef in iconElements {
-                        if let info = AXUtils.extractDockIconInfo(iconRef) {
-                            icons.append(info)
-                        }
-                    }
-                }
-            }
-            return icons
-        }.value
+    
+    private func handleRightClick(_ event: NSEvent) {
+        let clickPointTopLeft = getClickPoint(event)
+        guard isPointInDock(clickPointTopLeft) else { return }
+        
+        if let hitIcon = dockMonitor.icons.first(where: { $0.frame.contains(clickPointTopLeft) }) {
+            self.rightClickedIcon = hitIcon
+        }
+    }
+    
+    private func getClickPoint(_ event: NSEvent) -> CGPoint {
+        guard let screen = NSScreen.main else { return .zero }
+        let clickLocation = NSEvent.mouseLocation
+        return CGPoint(x: clickLocation.x, y: screen.frame.height - clickLocation.y)
+    }
+    
+    private func isPointInDock(_ point: CGPoint) -> Bool {
+        guard let screen = NSScreen.main else { return false }
+        return point.y > (screen.frame.height - 150)
     }
 }

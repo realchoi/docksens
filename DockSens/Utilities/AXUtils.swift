@@ -44,6 +44,13 @@ enum AXUtils {
     ///   - window: The window info to raise
     ///   - tolerance: Distance tolerance for matching window position (default 100)
     nonisolated static func raiseWindow(_ window: WindowInfo, tolerance: Double = 100.0) {
+        // ⚡️ 性能优化：如果已经有缓存的 AXUIElement，直接使用
+        if let cachedElement = window.axElement {
+            performRaise(cachedElement.element, title: window.title)
+            return
+        }
+        
+        // 降级方案：重新查找窗口
         let pid = window.pid
         let targetTitle = window.title
         let targetFrame = window.frame
@@ -93,27 +100,43 @@ enum AXUtils {
         }
         
         if let targetWindow = match ?? windowList.first {
-            // Restore if minimized
-            var minimizedRef: CFTypeRef?
-            if AXUIElementCopyAttributeValue(targetWindow, kAXMinimizedAttribute as CFString, &minimizedRef) == .success,
-               let minimized = minimizedRef as? Bool, minimized == true {
-                AXUIElementSetAttributeValue(targetWindow, kAXMinimizedAttribute as CFString, false as CFTypeRef)
-                print("✅ AXUtils: Restored minimized window '\(targetTitle)'")
-            }
-            
-            // Raise and Focus
-            AXUIElementPerformAction(targetWindow, kAXRaiseAction as CFString)
-            AXUIElementSetAttributeValue(targetWindow, kAXMainAttribute as CFString, true as CFTypeRef)
-            AXUIElementSetAttributeValue(targetWindow, kAXFocusedAttribute as CFString, true as CFTypeRef)
-            
-            print("✅ AXUtils: Raised window '\(targetTitle)'")
+            performRaise(targetWindow, title: targetTitle)
         } else {
             print("⚠️ AXUtils: Target window '\(targetTitle)' not found")
         }
     }
     
+    private nonisolated static func performRaise(_ element: AXUIElement, title: String) {
+        // Restore if minimized
+        var minimizedRef: CFTypeRef?
+        if AXUIElementCopyAttributeValue(element, kAXMinimizedAttribute as CFString, &minimizedRef) == .success,
+           let minimized = minimizedRef as? Bool, minimized == true {
+            AXUIElementSetAttributeValue(element, kAXMinimizedAttribute as CFString, false as CFTypeRef)
+            print("✅ AXUtils: Restored minimized window '\(title)'")
+        }
+        
+        // Raise and Focus
+        AXUIElementPerformAction(element, kAXRaiseAction as CFString)
+        AXUIElementSetAttributeValue(element, kAXMainAttribute as CFString, true as CFTypeRef)
+        AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, true as CFTypeRef)
+        
+        print("✅ AXUtils: Raised window '\(title)'")
+    }
+    
     /// Minimize a window using AX API
     nonisolated static func minimizeWindow(_ window: WindowInfo, tolerance: Double = 100.0) {
+        // ⚡️ 性能优化：如果已经有缓存的 AXUIElement，直接使用
+        if let cachedElement = window.axElement {
+            let result = AXUIElementSetAttributeValue(cachedElement.element, kAXMinimizedAttribute as CFString, true as CFTypeRef)
+            if result == .success {
+                print("✅ AXUtils: Minimized window '\(window.title)' (cached)")
+            } else {
+                print("⚠️ AXUtils: Failed to minimize cached window, error: \(result.rawValue)")
+            }
+            return
+        }
+        
+        // 降级方案：重新查找窗口
         let pid = window.pid
         let targetTitle = window.title
         let targetFrame = window.frame

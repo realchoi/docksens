@@ -7,6 +7,7 @@
 
 import SwiftUI
 import Observation
+import Combine
 
 @MainActor
 @Observable
@@ -21,22 +22,23 @@ final class AppState {
     private let windowActivator = WindowActivator()
 
     // Dock 预览相关
+    private let dockMonitor = DockMonitor() // 🔧 新增：Dock 监控器
     private let dockHoverDetector: DockHoverDetector
     private let dockPreviewPanel = DockPreviewPanelController()
     private let windowEngine = WindowEngine()
 
     // Dock 点击相关 (Stage 4)
     private let dockClickDetector: DockClickDetector
-    private let dockWindowController = DockWindowController()
+    // private let dockWindowController = DockWindowController() // 已移除
 
     // 🔧 添加：跟踪最后点击时间，防止点击后立即显示预览
     private var lastClickTime: Date = .distantPast
 
     init() {
-        // 初始化 DockHoverDetector（需要传入 engine）
-        self.dockHoverDetector = DockHoverDetector(engine: windowEngine)
-        // 初始化 DockClickDetector（需要传入 hoverDetector）
-        self.dockClickDetector = DockClickDetector(hoverDetector: dockHoverDetector)
+        // 初始化 DockHoverDetector (不再需要 engine)
+        self.dockHoverDetector = DockHoverDetector(dockMonitor: dockMonitor)
+        // 初始化 DockClickDetector（需要传入 hoverDetector 和 dockMonitor）
+        self.dockClickDetector = DockClickDetector(hoverDetector: dockHoverDetector, dockMonitor: dockMonitor)
 
         Task { await startMonitoringWindows() }
         Task { await startMonitoringPurchases() }
@@ -94,47 +96,39 @@ final class AppState {
     private func startDockHoverMonitoring() {
         dockHoverDetector.startMonitoring()
 
-        // 使用轮询检测悬浮状态
-        Task { @MainActor in
-            var previousHoveredIcon: DockIconInfo? = nil
-
-            while true {
-                try? await Task.sleep(for: .milliseconds(100))
-
-                let currentIcon = dockHoverDetector.hoveredIcon
-
-                // 🔧 修复问题3：检查是否有 Dock 右键菜单存在
-                if isDockMenuVisible() {
-                    // 有右键菜单时，不显示预览，避免遮挡
-                    if previousHoveredIcon != nil {
-                        dockPreviewPanel.hide()
-                        previousHoveredIcon = nil
-                    }
-                    continue
+        // 使用 Combine 监听悬浮状态，替代轮询
+        dockHoverDetector.$hoveredIcon
+            .removeDuplicates { $0?.id == $1?.id }
+            .sink { [weak self] icon in
+                guard let self = self else { return }
+                
+                // 1. 检查是否在点击冷却时间内
+                let timeSinceClick = Date().timeIntervalSince(self.lastClickTime)
+                if timeSinceClick < 0.5 {
+                    return
                 }
                 
-                // 检查是否在点击冷却时间内（0.5秒，仅用于左键点击）
-                let timeSinceClick = Date().timeIntervalSince(lastClickTime) 
-                if timeSinceClick < 0.5 {
-                    // 点击后短暂冷却，避免显示正在最小化的窗口
-                    continue
-                }
-
-                if currentIcon?.id != previousHoveredIcon?.id {
-                    if let icon = currentIcon, dockHoverDetector.isHovering {
-                        // 🔧 修复问题2：取消延迟隐藏，但不先hide，直接覆盖显示，消除闪烁
-                        dockPreviewPanel.cancelScheduledHide()
-                        
-                        // 开始悬浮在新图标上（直接覆盖，无需先hide）
-                        await showDockPreview(for: icon)
-                    } else {
-                        // 🔧 修复问题4：离开 Dock 时延迟隐藏，给用户时间移动到预览面板
-                        dockPreviewPanel.scheduleHide(delay: 0.3)
+                // 2. 处理悬浮状态变化
+                if let icon = icon {
+                    // 🔧 修复问题3：检查是否有 Dock 右键菜单存在
+                    if self.isDockMenuVisible() {
+                        // 有右键菜单时，不显示预览
+                        self.dockPreviewPanel.hide()
+                        return
                     }
-                    previousHoveredIcon = currentIcon
+                    
+                    // 🔧 修复问题2：取消延迟隐藏，直接显示
+                    self.dockPreviewPanel.cancelScheduledHide()
+                    
+                    Task {
+                        await self.showDockPreview(for: icon)
+                    }
+                } else {
+                    // 🔧 修复问题4：离开 Dock 时延迟隐藏
+                    self.dockPreviewPanel.scheduleHide(delay: 0.3)
                 }
             }
-        }
+            .store(in: &cancellables)
     }
 
     private func showDockPreview(for icon: DockIconInfo) async {
@@ -210,119 +204,93 @@ final class AppState {
 
     // MARK: - Dock Click Management (Stage 4)
 
+    private var cancellables = Set<AnyCancellable>()
+    
+    // 🔧 状态追踪：记录 MouseDown 时的意图
+    private var pendingMinimizePID: pid_t? = nil
+
     private func startDockClickMonitoring() {
         dockClickDetector.startMonitoring()
 
-        // 使用轮询检测点击
-        Task { @MainActor in
-            var lastProcessedIconId: Int? = nil
-            var lastProcessTime: Date = .distantPast
-            var isProcessing = false // 🔧 添加处理标志
-
-            while true {
-                try? await Task.sleep(for: .milliseconds(50))
-
-                // 🔧 如果正在处理，跳过本次检测
-                if isProcessing {
-                    continue
-                }
-                
-                // 🔧 处理右键点击：隐藏预览窗口
-                if dockClickDetector.rightClickedIcon != nil {
-                    print("🖱️ AppState: 检测到右键点击，隐藏预览")
-                    dockPreviewPanel.hide()
-                    
-                    // 重置右键点击状态
-                    dockClickDetector.rightClickedIcon = nil
-                    
-                    // 暂停悬浮检测，避免干扰右键菜单
-                    dockHoverDetector.pauseHoverDetection()
-                    continue
-                }
-
-                if let clickedIcon = dockClickDetector.clickedIcon {
-
-                    // 🔧 修复：检查是否是新的点击
-                    let now = Date()
-                    let timeSinceLastProcess = now.timeIntervalSince(lastProcessTime)
-                    let isSameIcon = (clickedIcon.id == lastProcessedIconId)
-
-                    if isSameIcon && timeSinceLastProcess < 0.8 { // 🔧 增强：同一图标 800ms 防抖（原来是 500ms）
-                        print("⏭️ AppState: 同一图标点击过快，忽略 (\(String(format: "%.3f", timeSinceLastProcess))s)")
-                        continue
-                    }
-
-                    // 🔧 修复：不同图标也需要短暂防抖，避免误触
-                    if !isSameIcon && timeSinceLastProcess < 0.3 { // 🔧 增强：不同图标 300ms 防抖（原来是 200ms）
-                        print("⏭️ AppState: 切换图标过快，忽略 (\(String(format: "%.3f", timeSinceLastProcess))s)")
-                        continue
-                    }
-
-                    // 🔧 关键修复：立即标记为正在处理，并清除 clickedIcon
-                    isProcessing = true
-                    lastProcessedIconId = clickedIcon.id
-                    lastProcessTime = now
-                    dockClickDetector.clickedIcon = nil // 清除，避免重复检测
-
-                    print("🖱️ AppState: 检测到 Dock 点击 '\(clickedIcon.title)'")
-
-                    // 处理点击
-                    await handleDockClick(for: clickedIcon)
-
-                    // 处理完成
-                    isProcessing = false
-                }
+        // 1. 监听 MouseDown：判断是否应该最小化
+        dockClickDetector.$mouseDownIcon
+            .compactMap { $0 }
+            .sink { [weak self] icon in
+                guard let self = self else { return }
+                self.handleDockMouseDown(for: icon)
             }
+            .store(in: &cancellables)
+            
+        // 2. 监听 MouseUp：执行操作
+        dockClickDetector.$mouseUpIcon
+            .compactMap { $0 }
+            .sink { [weak self] icon in
+                guard let self = self else { return }
+                self.handleDockMouseUp(for: icon)
+            }
+            .store(in: &cancellables)
+            
+        // 监听右键点击
+        dockClickDetector.$rightClickedIcon
+            .compactMap { $0 }
+            .sink { [weak self] _ in
+                guard let self = self else { return }
+                print("🖱️ AppState: 检测到右键点击，隐藏预览")
+                self.dockPreviewPanel.hide()
+                self.dockClickDetector.rightClickedIcon = nil
+                self.dockHoverDetector.pauseHoverDetection()
+            }
+            .store(in: &cancellables)
+    }
+    
+    private func handleDockMouseDown(for icon: DockIconInfo) {
+        // 1. 查找对应的应用
+        guard let app = findRunningApp(for: icon) else { return }
+        
+        // 2. 快速检查：应用是否前台且有可见窗口？
+        // 如果是，说明用户意图可能是“最小化”。
+        // 如果不是（应用后台或窗口最小化），用户意图是“激活/恢复”，这部分交给系统处理，我们不干预。
+        let shouldMinimize = windowEngine.isAppFocusedAndVisible(pid: app.processIdentifier)
+        
+        if shouldMinimize {
+            print("🖱️ AppState: MouseDown 检测到活跃窗口，准备在 Up 时最小化 (PID: \(app.processIdentifier))")
+            self.pendingMinimizePID = app.processIdentifier
+        } else {
+            self.pendingMinimizePID = nil
         }
+        
+        // 隐藏预览
+        dockPreviewPanel.hide()
+        dockHoverDetector.pauseHoverDetection()
     }
 
-    private func handleDockClick(for icon: DockIconInfo) async {
-        // 🔧 关键修复：立即记录点击前的前台应用，避免被 macOS Dock 自动激活影响判断
-        let frontmostAppBeforeClick = NSWorkspace.shared.frontmostApplication
-        let frontmostPIDBeforeClick = frontmostAppBeforeClick?.processIdentifier ?? -1
-
-        print("📸 AppState: 点击前前台应用 PID=\(frontmostPIDBeforeClick)")
-
-        // 🔧 修复：更新最后点击时间，防止点击后立即显示预览
+    private func handleDockMouseUp(for icon: DockIconInfo) {
         lastClickTime = Date()
-
-        // 🔧 修复问题2：点击时立即隐藏预览，避免显示最小化动画
         dockPreviewPanel.hide()
-
-        // 🔧 修复：点击后暂停悬停检测，避免鼠标不动时立即显示预览
         dockHoverDetector.pauseHoverDetection()
-
-        // 获取该应用的所有窗口
-        do {
-            let allWindows = try await windowEngine.activeWindows()
-
-            // 根据 bundleID 或 appName 过滤窗口
-            let appWindows = allWindows.filter { window in
-                // 尝试通过 URL 获取 bundleID
-                if let url = icon.url,
-                   let bundle = Bundle(url: url),
-                   let bundleID = bundle.bundleIdentifier {
-                    return window.bundleIdentifier == bundleID
+        
+        guard let app = findRunningApp(for: icon) else { return }
+        
+        // 检查是否匹配之前 MouseDown 的意图
+        if let pendingPID = self.pendingMinimizePID, pendingPID == app.processIdentifier {
+            print("🖱️ AppState: MouseUp 执行最小化 (PID: \(pendingPID))")
+            
+            // 执行最小化
+            // 我们需要找到该应用的窗口并最小化它
+            Task {
+                // 获取窗口列表 (使用缓存)
+                if let windows = try? await windowEngine.windows(for: app),
+                   let targetWindow = windows.first(where: { !$0.isMinimized }) {
+                    AXUtils.minimizeWindow(targetWindow)
                 }
-
-                // 降级：通过应用名称匹配
-                return window.appName == icon.title
             }
-
-            print("🎯 AppState: 处理 '\(icon.title)' 的点击，窗口数量: \(appWindows.count)")
-
-            // 🔧 关键修复：传递点击前的前台应用 PID
-            await dockWindowController.handleDockClick(
-                for: icon,
-                windows: appWindows,
-                frontmostPIDBeforeClick: frontmostPIDBeforeClick
-            )
-
-            // 🔧 修复：不再自动刷新预览，让鼠标移动后自然触发
-            // 用户需要移动鼠标才会重新显示预览，避免点击后立即弹出
-
-        } catch {
-            print("⚠️ AppState: 处理 Dock 点击失败 - \(error)")
+            
+            // 重置状态
+            self.pendingMinimizePID = nil
+        } else {
+            // 意图不是最小化（或者 MouseDown 时判断为后台/最小化），
+            // 此时系统 Dock 会自动处理“激活”或“恢复”，我们什么都不做。
+            print("🖱️ AppState: MouseUp 忽略 (交由系统处理)")
         }
     }
 

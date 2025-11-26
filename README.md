@@ -51,6 +51,7 @@
 - 状态管理: Observation Framework (@Observable 宏)
 
 - 底层核心: Accessibility API (AXUIElement), Core Graphics
+- Dock 监控: 自研 `DockMonitor` 引擎，结合 AXObserver 与智能轮询机制，完美适配 Dock 放大、缩放及动态布局调整。
 
 - 商业化: StoreKit 2 (SubscriptionStoreView 原生订阅界面)
 
