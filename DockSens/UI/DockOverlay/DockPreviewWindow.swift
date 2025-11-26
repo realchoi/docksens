@@ -50,7 +50,7 @@ struct DockPreviewOverlay: View {
             .padding(.vertical, 12)
         }
         .fixedSize(horizontal: false, vertical: true)
-        .background(Color.clear)  // 确保完全透明
+        .background(Color.black.opacity(0.001))  // 🔧 优化：使用极低透明度而非 clear，确保鼠标事件能被捕获
         .background {
             // macOS-style vibrant background with refined materials
             ZStack {
@@ -149,9 +149,10 @@ struct WindowThumbnailCard: View {
                 .frame(width: 260)
         }
         .frame(width: 272, height: 192) // 适配新尺寸
-        .contentShape(Rectangle())
+        .contentShape(Rectangle()) // 🔧 优化：确保整个区域都能响应鼠标悬停
         .onHover { hovering in
-            withAnimation(.smooth(duration: 0.2)) {
+            // 🔧 优化：使用更快的动画，减少迟滞感
+            withAnimation(.easeInOut(duration: 0.1)) {
                 isHovered = hovering
             }
         }
