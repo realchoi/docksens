@@ -66,10 +66,16 @@ struct DockPreviewOverlay: View {
                     endPoint: .bottom
                 )
             }
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        }
+        // 🔧 关键修复：将阴影应用在背景层，避免在圆角外产生矩形边界框
+        .background {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color.clear)
+                .shadow(color: .black.opacity(0.35), radius: 24, x: 0, y: 12)
+                .shadow(color: .black.opacity(0.15), radius: 8, x: 0, y: 4)
         }
         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .shadow(color: .black.opacity(0.35), radius: 24, x: 0, y: 12)
-        .shadow(color: .black.opacity(0.15), radius: 8, x: 0, y: 4)
         // Subtle feedback on appearance
         .sensoryFeedback(.selection, trigger: iconTitle)
     }
@@ -217,6 +223,12 @@ class DockPreviewPanelController {
         hostingView.wantsLayer = true
         hostingView.layer?.backgroundColor = NSColor.clear.cgColor
         hostingView.layer?.isOpaque = false
+        // 🔧 关键修复：完全禁用 NSHostingView 的圆角和遮罩，避免出现淡色直角痕迹
+        hostingView.layer?.cornerRadius = 0
+        hostingView.layer?.masksToBounds = false
+        if #available(macOS 10.15, *) {
+            hostingView.layer?.cornerCurve = .circular
+        }
 
         // 2. 计算尺寸
         let panelSize = hostingView.fittingSize
