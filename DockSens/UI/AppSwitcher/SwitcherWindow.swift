@@ -143,13 +143,30 @@ struct AdaptiveWindowGrid: View {
         var currentRow: [LayoutItem] = []
         var currentWidth: CGFloat = 0
         
+        let padding: CGFloat = 6 // Must match WindowItemView padding
+        
         for (index, window) in windows.enumerated() {
             // 根据宽高比计算宽度
-            let ratio = window.frame.height > 0 ? window.frame.width / window.frame.height : 1.0 // 默认 1.0 (正方形)
+            // ⚡️ 关键修复：优先使用截图的实际宽高比，因为截图可能被裁剪了透明边缘
+            // 如果使用 window.frame 计算，会导致裁剪后的图片在容器中留白不一致
+            let ratio: CGFloat
+            if let image = window.image {
+                ratio = CGFloat(image.width) / CGFloat(image.height)
+            } else {
+                ratio = window.frame.height > 0 ? window.frame.width / window.frame.height : 1.0
+            }
+            
             // 限制宽高比，防止过宽或过窄
-            // 🔧 优化：放宽限制 (0.6 - 3.0) 以减少留白，使容器更贴合实际窗口形状
-            let clampedRatio = max(0.6, min(ratio, 3.0))
-            let itemWidth = itemHeight * clampedRatio
+            // 🔧 优化：放宽下限至 0.3，防止窄窗口（如手机模拟器）左右留白过多
+            let clampedRatio = max(0.3, min(ratio, 3.0))
+            
+            // 核心修复：宽度计算必须考虑 Padding
+            // itemWidth = (图片高度 * 比例) + (左右 Padding)
+            // 图片高度 = itemHeight - (上下 Padding)
+            // 假设上下左右 Padding 一致，均为 6
+            let imageHeight = itemHeight - (padding * 2)
+            let imageWidth = imageHeight * clampedRatio
+            let itemWidth = imageWidth + (padding * 2)
             
             if !currentRow.isEmpty && (currentWidth + itemWidth + spacing > availableWidth) {
                 rows.append(currentRow)

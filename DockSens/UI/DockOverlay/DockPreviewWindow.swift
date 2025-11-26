@@ -87,24 +87,40 @@ struct WindowThumbnailCard: View {
 
     @State private var isHovered = false
 
+    // Constants
+    private let fixedHeight: CGFloat = 160
+    private let imagePadding: CGFloat = 8
+    private let minWidth: CGFloat = 100
+    private let maxWidth: CGFloat = 320 // Reduced from 400
+
+    private var cardWidth: CGFloat {
+        if let cgImage = window.image {
+            let width = CGFloat(cgImage.width)
+            let height = CGFloat(cgImage.height)
+            guard height > 0 else { return 260 }
+            
+            // Calculate based on image height (container height - padding)
+            let imageHeight = fixedHeight - (imagePadding * 2)
+            let aspectRatio = width / height
+            let imageWidth = imageHeight * aspectRatio
+            let containerWidth = imageWidth + (imagePadding * 2)
+            
+            return min(max(containerWidth, minWidth), maxWidth)
+        }
+        return 260 // Default width for placeholder
+    }
+
     var body: some View {
-        VStack(spacing: 0) { // 紧凑布局，移除默认间距
-            // 缩略图容器 - 严格固定尺寸确保居中
+        VStack(spacing: 0) {
+            // Thumbnail Container
             ZStack(alignment: .center) {
                 if let cgImage = window.image {
-                    // 使用 GeometryReader 确保图片完全居中
-                    GeometryReader { geometry in
-                        Image(decorative: cgImage, scale: 1.0)
-                            .resizable()
-                            .aspectRatio(contentMode: .fit)
-                            .position(
-                                x: geometry.size.width / 2,
-                                y: geometry.size.height / 2
-                            )
-                    }
-                    .padding(8) // 增加图片与边缘的距离
+                    Image(decorative: cgImage, scale: 1.0)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(width: cardWidth - (imagePadding * 2), height: fixedHeight - (imagePadding * 2))
                 } else {
-                    // 优雅的占位符
+                    // Placeholder
                     ZStack {
                         Rectangle()
                             .fill(
@@ -130,31 +146,31 @@ struct WindowThumbnailCard: View {
                             }
                         }
                     }
+                    .frame(width: cardWidth - (imagePadding * 2), height: fixedHeight - (imagePadding * 2))
                 }
                 
-                // 悬浮边框 - 应用到整个容器
+                // Border - applied to the container, outside the image padding
                 if isHovered {
                     RoundedRectangle(cornerRadius: 8, style: .continuous)
                         .strokeBorder(.tint, lineWidth: 2)
+                        .frame(width: cardWidth, height: fixedHeight)
                 }
             }
-            .frame(width: 260, height: 160, alignment: .center)  // 增大尺寸，提升空间利用率
-
-            // 移除 clipShape 以保持缩略图直角，但保留外层圆角边框
-            // .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .frame(width: cardWidth, height: fixedHeight, alignment: .center)
             .shadow(color: .black.opacity(isHovered ? 0.25 : 0.15), radius: isHovered ? 8 : 4, x: 0, y: 2)
 
-            // 窗口标题
+            // Window Title
             Text(window.title.isEmpty ? window.appName : window.title)
                 .font(.system(size: 11, weight: isHovered ? .medium : .regular))
-                .lineLimit(1) // 限制为单行，更整洁
+                .lineLimit(1)
                 .padding(.horizontal, 4)
-                .padding(.vertical, 6) // 减少垂直间距
+                .padding(.vertical, 4) // Reduced from 6 to 4 for compactness
                 .multilineTextAlignment(.center)
                 .foregroundStyle(isHovered ? .primary : .secondary)
-                .frame(width: 260)
+                .frame(width: cardWidth)
         }
-        .frame(width: 272, height: 192) // 适配新尺寸
+        // Removed fixed height calculation (+ 32) to allow self-sizing based on content
+        .frame(width: cardWidth + 12) 
         .contentShape(Rectangle())
         .onHover { hovering in
             isHovered = hovering
