@@ -384,81 +384,10 @@ class SwitcherPanelController {
         app.activate(options: options)
         
         try? await Task.sleep(for: .milliseconds(50))
-        await performAXRaise(window)
-    }
-    
-    private func performAXRaise(_ window: WindowInfo) async {
-        let pid = window.pid
-        let targetTitle = window.title
-        let targetFrame = window.frame
         
-        await Task.detached { [weak self] in
-            guard let self = self else { return }
-            
-            let appRef = AXUIElementCreateApplication(pid)
-            var windowsRef: CFTypeRef?
-            
-            guard self.getAXAttribute(appRef, kAXWindowsAttribute as String, ofType: [AXUIElement].self) != nil else { return }
-            
-            if AXUIElementCopyAttributeValue(appRef, kAXWindowsAttribute as CFString, &windowsRef) != .success { return }
-            guard let windowList = windowsRef as? [AXUIElement] else { return }
-            
-            let match = windowList.first { axWindow in
-                var titleRef: CFTypeRef?
-                // 1. 标题匹配
-                if AXUIElementCopyAttributeValue(axWindow, kAXTitleAttribute as CFString, &titleRef) == .success,
-                   let t = titleRef as? String, t == targetTitle {
-                    
-                    // 2. 尺寸位置匹配 (放宽容差到 100，解决 "hit-or-miss")
-                    if let posValue = self.getAXAttribute(axWindow, kAXPositionAttribute as String, ofType: AXValue.self),
-                       let sizeValue = self.getAXAttribute(axWindow, kAXSizeAttribute as String, ofType: AXValue.self) {
-                        
-                        var pos = CGPoint.zero
-                        var size = CGSize.zero
-                        AXValueGetValue(posValue, .cgPoint, &pos)
-                        AXValueGetValue(sizeValue, .cgSize, &size)
-                        
-                        let axCenter = CGPoint(x: pos.x + size.width/2, y: pos.y + size.height/2)
-                        let targetCenter = CGPoint(x: targetFrame.midX, y: targetFrame.midY)
-                        let dist = hypot(axCenter.x - targetCenter.x, axCenter.y - targetCenter.y)
-                        
-                        // ⚡️ 优化：容差 100pt，确保即使 AX/SCK 坐标有偏差也能命中
-                        if dist < 100 { return true }
-                    } else {
-                        // 无法获取 Frame，但标题一致，认为匹配
-                        return true
-                    }
-                }
-                return false
-            }
-            
-            if let targetWindow = match ?? windowList.first {
-                // 最小化还原
-                var minimizedRef: CFTypeRef?
-                if AXUIElementCopyAttributeValue(targetWindow, kAXMinimizedAttribute as CFString, &minimizedRef) == .success,
-                   let minimized = minimizedRef as? Bool, minimized == true {
-                     AXUIElementSetAttributeValue(targetWindow, kAXMinimizedAttribute as CFString, false as CFTypeRef)
-                }
-                
-                // 激活
-                AXUIElementPerformAction(targetWindow, kAXRaiseAction as CFString)
-                AXUIElementSetAttributeValue(targetWindow, kAXMainAttribute as CFString, true as CFTypeRef)
-                AXUIElementSetAttributeValue(targetWindow, kAXFocusedAttribute as CFString, true as CFTypeRef)
-            }
+        // 使用 AXUtils 提升窗口
+        await Task.detached {
+            AXUtils.raiseWindow(window)
         }.value
-    }
-    
-    nonisolated private func getAXAttribute<T>(_ element: AXUIElement, _ attribute: String, ofType type: T.Type) -> T? {
-        var value: CFTypeRef?
-        let result = AXUIElementCopyAttributeValue(element, attribute as CFString, &value)
-        if result == .success, let value = value {
-            if T.self == AXValue.self { return value as? T }
-            if T.self == String.self { return value as? T }
-            if T.self == [AXUIElement].self { return value as? T }
-            if T.self == Bool.self { return value as? T }
-            if T.self == URL.self { return value as? T }
-            return value as? T
-        }
-        return nil
     }
 }

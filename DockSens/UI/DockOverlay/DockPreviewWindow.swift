@@ -155,12 +155,9 @@ struct WindowThumbnailCard: View {
                 .frame(width: 260)
         }
         .frame(width: 272, height: 192) // 适配新尺寸
-        .contentShape(Rectangle()) // 🔧 优化：确保整个区域都能响应鼠标悬停
+        .contentShape(Rectangle())
         .onHover { hovering in
-            // 🔧 优化：使用更快的动画，减少迟滞感
-            withAnimation(.easeInOut(duration: 0.1)) {
-                isHovered = hovering
-            }
+            isHovered = hovering
         }
         .onTapGesture {
             onActivate()

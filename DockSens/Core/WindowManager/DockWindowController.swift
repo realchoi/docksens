@@ -118,76 +118,8 @@ final class DockWindowController {
     /// 最小化窗口
     private func minimizeWindow(_ window: WindowInfo) {
         Task.detached {
-            let appRef = AXUIElementCreateApplication(window.pid)
-            var windowsRef: CFTypeRef?
-
-            guard AXUIElementCopyAttributeValue(appRef, kAXWindowsAttribute as CFString, &windowsRef) == .success else {
-                print("⚠️ DockWindowController: 无法获取应用 \(window.pid) 的窗口列表")
-                return
-            }
-
-            guard let windowList = windowsRef as? [AXUIElement] else {
-                print("⚠️ DockWindowController: 窗口列表类型转换失败")
-                return
-            }
-
-            // 匹配目标窗口
-            let match = windowList.first { axWindow in
-                var titleRef: CFTypeRef?
-
-                // 1. 标题匹配
-                if AXUIElementCopyAttributeValue(axWindow, kAXTitleAttribute as CFString, &titleRef) == .success,
-                   let t = titleRef as? String, t == window.title {
-
-                    // 2. 位置匹配（可选，更精确）
-                    if let posValue = Self.getAXAttribute(axWindow, kAXPositionAttribute, ofType: AXValue.self),
-                       let sizeValue = Self.getAXAttribute(axWindow, kAXSizeAttribute, ofType: AXValue.self) {
-
-                        var pos = CGPoint.zero
-                        var size = CGSize.zero
-                        AXValueGetValue(posValue, .cgPoint, &pos)
-                        AXValueGetValue(sizeValue, .cgSize, &size)
-
-                        let axCenter = CGPoint(x: pos.x + size.width / 2, y: pos.y + size.height / 2)
-                        let targetCenter = CGPoint(x: window.frame.midX, y: window.frame.midY)
-                        let dist = hypot(axCenter.x - targetCenter.x, axCenter.y - targetCenter.y)
-
-                        if dist < 100 { return true }
-                    } else {
-                        // 标题一致，认为匹配
-                        return true
-                    }
-                }
-                return false
-            }
-
-            if let targetWindow = match ?? windowList.first {
-                // 设置最小化属性
-                let result = AXUIElementSetAttributeValue(targetWindow, kAXMinimizedAttribute as CFString, true as CFTypeRef)
-
-                if result == .success {
-                    print("✅ DockWindowController: 成功最小化窗口 '\(window.title)'")
-                } else {
-                    print("⚠️ DockWindowController: 最小化失败，错误码: \(result.rawValue)")
-                }
-            } else {
-                print("⚠️ DockWindowController: 未找到匹配的窗口 '\(window.title)'")
-            }
+            AXUtils.minimizeWindow(window)
         }
-    }
-
-    // MARK: - Helper Methods
-
-    private static nonisolated func getAXAttribute<T>(_ element: AXUIElement, _ attribute: String, ofType type: T.Type) -> T? {
-        var value: CFTypeRef?
-        let result = AXUIElementCopyAttributeValue(element, attribute as CFString, &value)
-        if result == .success, let value = value {
-            if T.self == AXValue.self { return value as? T }
-            if T.self == String.self { return value as? T }
-            if T.self == [AXUIElement].self { return value as? T }
-            if T.self == Bool.self { return value as? T }
-            return value as? T
-        }
-        return nil
     }
 }
+

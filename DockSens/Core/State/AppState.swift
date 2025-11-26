@@ -60,6 +60,35 @@ final class AppState {
         }
     }
 
+    // MARK: - Dock Menu Detection (问题3修复)
+    
+    /// 检测 Dock 右键菜单是否存在
+    private func isDockMenuVisible() -> Bool {
+        // 检查 Dock 进程是否有菜单窗口显示
+        let dockApps = NSWorkspace.shared.runningApplications.filter {
+            $0.bundleIdentifier == "com.apple.dock"
+        }
+        guard let dockApp = dockApps.first else { return false }
+        
+        let dockRef = AXUIElementCreateApplication(dockApp.processIdentifier)
+        
+        // 检查是否有菜单栏或上下文菜单
+        if let _ = AXUtils.getAXAttribute(dockRef, kAXMenuBarAttribute, ofType: AXUIElement.self) {
+            // 有菜单栏，可能是右键菜单
+            return true
+        }
+        
+        // 检查是否有焦点元素（通常右键菜单会成为焦点）
+        if let focused = AXUtils.getAXAttribute(dockRef, kAXFocusedUIElementAttribute, ofType: AXUIElement.self) {
+            let role = AXUtils.getAXAttribute(focused, kAXRoleAttribute, ofType: String.self)
+            if role == "AXMenu" || role == "AXMenuItem" {
+                return true
+            }
+        }
+        
+        return false
+    }
+
     // MARK: - Dock Preview Management
 
     private func startDockHoverMonitoring() {
@@ -74,16 +103,29 @@ final class AppState {
 
                 let currentIcon = dockHoverDetector.hoveredIcon
 
-                // 🔧 修复：检查是否在点击冷却时间内（1秒）
-                let timeSinceClick = Date().timeIntervalSince(lastClickTime)
-                if timeSinceClick < 1.0 {
-                    // 点击后 1 秒内不显示预览，避免显示正在最小化的窗口
+                // 🔧 修复问题3：检查是否有 Dock 右键菜单存在
+                if isDockMenuVisible() {
+                    // 有右键菜单时，不显示预览，避免遮挡
+                    if previousHoveredIcon != nil {
+                        dockPreviewPanel.hide()
+                        previousHoveredIcon = nil
+                    }
+                    continue
+                }
+                
+                // 检查是否在点击冷却时间内（0.5秒，仅用于左键点击）
+                let timeSinceClick = Date().timeIntervalSince(lastClickTime) 
+                if timeSinceClick < 0.5 {
+                    // 点击后短暂冷却，避免显示正在最小化的窗口
                     continue
                 }
 
                 if currentIcon?.id != previousHoveredIcon?.id {
                     if let icon = currentIcon, dockHoverDetector.isHovering {
-                        // 开始悬浮在新图标上
+                        // 🔧 修复问题2：取消延迟隐藏，但不先hide，直接覆盖显示，消除闪烁
+                        dockPreviewPanel.cancelScheduledHide()
+                        
+                        // 开始悬浮在新图标上（直接覆盖，无需先hide）
                         await showDockPreview(for: icon)
                     } else {
                         // 🔧 修复问题4：离开 Dock 时延迟隐藏，给用户时间移动到预览面板
@@ -300,7 +342,7 @@ final class AppState {
     
     func toggleSwitcher() {
         // 1. 权限检查
-        guard WindowEngine.checkAccessibilityPermission() else {
+        guard AXUtils.checkAccessibilityPermission() else {
             let alert = NSAlert()
             // 修改点：使用 String(localized:) 显式进行本地化
             alert.messageText = String(localized: "Permissions Missing")

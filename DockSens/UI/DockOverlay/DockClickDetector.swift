@@ -97,18 +97,18 @@ class DockClickDetector: ObservableObject {
             guard let dockApp = dockApps.first else { return [] }
 
             let dockRef = AXUIElementCreateApplication(dockApp.processIdentifier)
-            guard let children = self.getAXAttribute(dockRef, kAXChildrenAttribute, ofType: [AXUIElement].self) else {
+            guard let children = AXUtils.getAXAttribute(dockRef, kAXChildrenAttribute, ofType: [AXUIElement].self) else {
                 return []
             }
 
             for child in children {
-                let role = self.getAXAttribute(child, kAXRoleAttribute, ofType: String.self)
+                let role = AXUtils.getAXAttribute(child, kAXRoleAttribute, ofType: String.self)
                 if role == "AXList" {
-                    guard let iconElements = self.getAXAttribute(child, kAXChildrenAttribute, ofType: [AXUIElement].self) else {
+                    guard let iconElements = AXUtils.getAXAttribute(child, kAXChildrenAttribute, ofType: [AXUIElement].self) else {
                         continue
                     }
                     for iconRef in iconElements {
-                        if let info = self.extractDockIconInfo(iconRef) {
+                        if let info = AXUtils.extractDockIconInfo(iconRef) {
                             icons.append(info)
                         }
                     }
@@ -116,44 +116,5 @@ class DockClickDetector: ObservableObject {
             }
             return icons
         }.value
-    }
-
-    private nonisolated func extractDockIconInfo(_ element: AXUIElement) -> DockIconInfo? {
-        let title = getAXAttribute(element, kAXTitleAttribute, ofType: String.self) ?? "Unknown"
-        let role = getAXAttribute(element, kAXRoleAttribute, ofType: String.self)
-        if role != "AXDockItem" { return nil }
-
-        var frame = CGRect.zero
-        if let posValue = getAXAttribute(element, kAXPositionAttribute, ofType: AXValue.self),
-           let sizeValue = getAXAttribute(element, kAXSizeAttribute, ofType: AXValue.self) {
-            var pos = CGPoint.zero
-            var size = CGSize.zero
-            AXValueGetValue(posValue, .cgPoint, &pos)
-            AXValueGetValue(sizeValue, .cgSize, &size)
-            frame = CGRect(origin: pos, size: size)
-        }
-
-        var url: URL? = nil
-        if let urlString = getAXAttribute(element, kAXURLAttribute, ofType: String.self) {
-            url = URL(string: urlString)
-        } else if let urlRef = getAXAttribute(element, kAXURLAttribute, ofType: URL.self) {
-            url = urlRef
-        }
-
-        return DockIconInfo(id: Int(frame.origin.x), title: title, frame: frame, url: url)
-    }
-
-    private nonisolated func getAXAttribute<T>(_ element: AXUIElement, _ attribute: String, ofType type: T.Type) -> T? {
-        var value: CFTypeRef?
-        let result = AXUIElementCopyAttributeValue(element, attribute as CFString, &value)
-        if result == .success, let value = value {
-            if T.self == AXValue.self { return value as? T }
-            if T.self == String.self { return value as? T }
-            if T.self == [AXUIElement].self { return value as? T }
-            if T.self == Bool.self { return value as? T }
-            if T.self == URL.self { return value as? T }
-            return value as? T
-        }
-        return nil
     }
 }

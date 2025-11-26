@@ -47,6 +47,10 @@ private struct AXWindowData: Sendable {
 
 actor WindowEngine {
     
+    // MARK: - Image Cache
+    
+    private let imageCache = WindowImageCache(maxSize: 50, maxAge: 2.5)
+    
     // MARK: - 1. Window Scanning (AX-Driven with SCK-Enrichment)
     
     func activeWindows() async throws -> [WindowInfo] {
@@ -136,18 +140,27 @@ actor WindowEngine {
                         
                         if let scMatch = match {
                             sysID = scMatch.windowID
-                            // 配置截图参数 - 不捕获阴影
-                            let filter = SCContentFilter(desktopIndependentWindow: scMatch)
-                            let config = SCStreamConfiguration()
-                            config.showsCursor = false
-                            config.ignoreShadowsSingleWindow = true  // 不捕获窗口阴影
-                            config.width = Int(scMatch.frame.width * 2)
-                            config.height = Int(scMatch.frame.height * 2)
                             
-                            // 捕获并裁剪透明边缘
-                            if let fullImage = try? await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config) {
-                                // 裁剪掉图片边缘的透明区域
-                                image = self.cropTransparentEdges(from: fullImage) ?? fullImage
+                            // ⚡️ 性能优化：先检查缓存
+                            if let cachedImage = await self.imageCache.getImage(for: sysID, frame: axWin.frame) {
+                                image = cachedImage
+                            } else {
+                                // 配置截图参数 - 不捕获阴影
+                                let filter = SCContentFilter(desktopIndependentWindow: scMatch)
+                                let config = SCStreamConfiguration()
+                                config.showsCursor = false
+                                config.ignoreShadowsSingleWindow = true  // 不捕获窗口阴影
+                                config.width = Int(scMatch.frame.width * 2)
+                                config.height = Int(scMatch.frame.height * 2)
+                                
+                                // 捕获并裁剪透明边缘
+                                if let fullImage = try? await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config) {
+                                    // 裁剪掉图片边缘的透明区域
+                                    let croppedImage = self.cropTransparentEdges(from: fullImage) ?? fullImage
+                                    image = croppedImage
+                                    // 存入缓存
+                                    await self.imageCache.setImage(croppedImage, for: sysID, frame: axWin.frame)
+                                }
                             }
                         }
                         
@@ -173,10 +186,20 @@ actor WindowEngine {
             }
             
             // 排序：优先按 SystemID 倒序，没有 ID 的按 PID
-            return finalResults.sorted {
+            let sorted = finalResults.sorted {
                 if $0.windowID != $1.windowID { return $0.windowID > $1.windowID }
                 return $0.pid < $1.pid
             }
+            
+            // 📊 输出缓存统计信息（仅在开发模式，且每 5 次请求输出一次）
+            #if DEBUG
+            let stats = await imageCache.getStats()
+            if stats.totalRequests % 5 == 0 {
+                print("📊 WindowEngine Cache: Hit Rate=\(String(format: "%.1f%%", stats.hitRate * 100)), Size=\(stats.cacheSize), Requests=\(stats.totalRequests)")
+            }
+            #endif
+            
+            return sorted
         }
     }
     
@@ -243,18 +266,27 @@ actor WindowEngine {
             
             if let scMatch = match {
                 sysID = scMatch.windowID
-                // 配置截图参数 - 不捕获阴影
-                let filter = SCContentFilter(desktopIndependentWindow: scMatch)
-                let config = SCStreamConfiguration()
-                config.showsCursor = false
-                config.ignoreShadowsSingleWindow = true  // 不捕获窗口阴影
-                config.width = Int(scMatch.frame.width * 2)
-                config.height = Int(scMatch.frame.height * 2)
                 
-                // 捕获并裁剪透明边缘
-                if let fullImage = try? await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config) {
-                    // 裁剪掉图片边缘的透明区域
-                    image = self.cropTransparentEdges(from: fullImage) ?? fullImage
+                // ⚡️ 性能优化：先检查缓存
+                if let cachedImage = await self.imageCache.getImage(for: sysID, frame: axWin.frame) {
+                    image = cachedImage
+                } else {
+                    // 配置截图参数 - 不捕获阴影
+                    let filter = SCContentFilter(desktopIndependentWindow: scMatch)
+                    let config = SCStreamConfiguration()
+                    config.showsCursor = false
+                    config.ignoreShadowsSingleWindow = true  // 不捕获窗口阴影
+                    config.width = Int(scMatch.frame.width * 2)
+                    config.height = Int(scMatch.frame.height * 2)
+                    
+                    // 捕获并裁剪透明边缘
+                    if let fullImage = try? await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config) {
+                        // 裁剪掉图片边缘的透明区域
+                        let croppedImage = self.cropTransparentEdges(from: fullImage) ?? fullImage
+                        image = croppedImage
+                        // 存入缓存
+                        await self.imageCache.setImage(croppedImage, for: sysID, frame: axWin.frame)
+                    }
                 }
             }
             
@@ -271,10 +303,20 @@ actor WindowEngine {
             ))
         }
         
-        return appResults.sorted {
+        let sorted = appResults.sorted {
             if $0.windowID != $1.windowID { return $0.windowID > $1.windowID }
             return $0.pid < $1.pid
         }
+        
+        // 📊 输出缓存统计信息（仅在开发模式，且每 5 次请求输出一次）
+        #if DEBUG
+        let stats = await imageCache.getStats()
+        if stats.totalRequests % 5 == 0 {
+            print("📊 WindowEngine Cache: Hit Rate=\(String(format: "%.1f%%", stats.hitRate * 100)), Size=\(stats.cacheSize), Requests=\(stats.totalRequests)")
+        }
+        #endif
+        
+        return sorted
     }
     
     // MARK: - Accessibility Fetcher (nonisolated)
@@ -283,19 +325,19 @@ actor WindowEngine {
         let pid = app.processIdentifier
         let appRef = AXUIElementCreateApplication(pid)
         
-        guard let windowsRef = getAXAttribute(appRef, kAXWindowsAttribute, ofType: [AXUIElement].self) else {
+        guard let windowsRef = AXUtils.getAXAttribute(appRef, kAXWindowsAttribute, ofType: [AXUIElement].self) else {
             return []
         }
         
         var results: [AXWindowData] = []
         
         for axWindow in windowsRef {
-            let title = getAXAttribute(axWindow, kAXTitleAttribute, ofType: String.self) ?? ""
+            let title = AXUtils.getAXAttribute(axWindow, kAXTitleAttribute, ofType: String.self) ?? ""
             if title.isEmpty { continue }
             
             var frame: CGRect = .zero
-            if let posValue = getAXAttribute(axWindow, kAXPositionAttribute, ofType: AXValue.self),
-               let sizeValue = getAXAttribute(axWindow, kAXSizeAttribute, ofType: AXValue.self) {
+            if let posValue = AXUtils.getAXAttribute(axWindow, kAXPositionAttribute, ofType: AXValue.self),
+               let sizeValue = AXUtils.getAXAttribute(axWindow, kAXSizeAttribute, ofType: AXValue.self) {
                 var pos = CGPoint.zero
                 var size = CGSize.zero
                 AXValueGetValue(posValue, .cgPoint, &pos)
@@ -305,7 +347,7 @@ actor WindowEngine {
             
             if frame.width < 20 || frame.height < 20 { continue }
             
-            let isMinimized = getAXAttribute(axWindow, kAXMinimizedAttribute, ofType: Bool.self) ?? false
+            let isMinimized = AXUtils.getAXAttribute(axWindow, kAXMinimizedAttribute, ofType: Bool.self) ?? false
             
             let data = AXWindowData(
                 pid: pid,
@@ -331,60 +373,21 @@ actor WindowEngine {
         let dockApps = NSWorkspace.shared.runningApplications.filter { $0.bundleIdentifier == "com.apple.dock" }
         guard let dockApp = dockApps.first else { return [] }
         let dockRef = AXUIElementCreateApplication(dockApp.processIdentifier)
-        guard let children = getAXAttribute(dockRef, kAXChildrenAttribute, ofType: [AXUIElement].self) else { return [] }
+        guard let children = AXUtils.getAXAttribute(dockRef, kAXChildrenAttribute, ofType: [AXUIElement].self) else { return [] }
         for child in children {
-            let role = getAXAttribute(child, kAXRoleAttribute, ofType: String.self)
+            let role = AXUtils.getAXAttribute(child, kAXRoleAttribute, ofType: String.self)
             if role == "AXList" {
-                guard let iconElements = getAXAttribute(child, kAXChildrenAttribute, ofType: [AXUIElement].self) else { continue }
+                guard let iconElements = AXUtils.getAXAttribute(child, kAXChildrenAttribute, ofType: [AXUIElement].self) else { continue }
                 for iconRef in iconElements {
-                    if let info = extractDockIconInfo(iconRef) { icons.append(info) }
+                    if let info = AXUtils.extractDockIconInfo(iconRef) { icons.append(info) }
                 }
             }
         }
         return icons
     }
 
-    nonisolated private func extractDockIconInfo(_ element: AXUIElement) -> DockIconInfo? {
-        // ... (保持不变) ...
-        let title = getAXAttribute(element, kAXTitleAttribute, ofType: String.self) ?? "Unknown"
-        let role = getAXAttribute(element, kAXRoleAttribute, ofType: String.self)
-        if role != "AXDockItem" { return nil }
-        var frame = CGRect.zero
-        if let posValue = getAXAttribute(element, kAXPositionAttribute, ofType: AXValue.self),
-           let sizeValue = getAXAttribute(element, kAXSizeAttribute, ofType: AXValue.self) {
-            var pos = CGPoint.zero
-            var size = CGSize.zero
-            AXValueGetValue(posValue, .cgPoint, &pos)
-            AXValueGetValue(sizeValue, .cgSize, &size)
-            frame = CGRect(origin: pos, size: size)
-        }
-        var url: URL? = nil
-        if let urlString = getAXAttribute(element, kAXURLAttribute, ofType: String.self) {
-            url = URL(string: urlString)
-        } else if let urlRef = getAXAttribute(element, kAXURLAttribute, ofType: URL.self) {
-            url = urlRef
-        }
-        return DockIconInfo(id: Int(frame.origin.x), title: title, frame: frame, url: url)
-    }
-    
-    nonisolated private func getAXAttribute<T>(_ element: AXUIElement, _ attribute: String, ofType type: T.Type) -> T? {
-        var value: CFTypeRef?
-        let result = AXUIElementCopyAttributeValue(element, attribute as CFString, &value)
-        if result == .success, let value = value {
-            if T.self == AXValue.self { return value as? T }
-            if T.self == String.self { return value as? T }
-            if T.self == [AXUIElement].self { return value as? T }
-            if T.self == Bool.self { return value as? T }
-            if T.self == URL.self { return value as? T }
-            return value as? T
-        }
-        return nil
-    }
-    
     nonisolated static func checkAccessibilityPermission() -> Bool {
-        let promptKey = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
-        let options = [promptKey: true] as CFDictionary
-        return AXIsProcessTrustedWithOptions(options)
+        return AXUtils.checkAccessibilityPermission()
     }
     
     // 裁剪 CGImage 边缘的透明区域
