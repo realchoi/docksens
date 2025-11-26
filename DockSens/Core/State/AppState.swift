@@ -116,6 +116,14 @@ final class AppState {
                         self.dockPreviewPanel.hide()
                         return
                     }
+
+                    // 🔧 修复：检查 "Dock 预览" 开关设置
+                    // 如果用户关闭了预览，直接隐藏并返回
+                    let showPreviews = UserDefaults.standard.bool(forKey: "showDockPreviews")
+                    if !showPreviews {
+                        self.dockPreviewPanel.hide()
+                        return
+                    }
                     
                     // 🔧 修复问题2：取消延迟隐藏，直接显示
                     self.dockPreviewPanel.cancelScheduledHide()

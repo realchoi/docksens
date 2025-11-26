@@ -59,6 +59,13 @@ class DockMonitor: ObservableObject {
         
         // 4. 移除轮询 (已通过启发式刷新替代)
         // startPolling()
+        
+        // 5. 监听应用启动/退出，因为这会改变 Dock 布局
+        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(handleAppChange), name: NSWorkspace.didLaunchApplicationNotification, object: nil)
+        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(handleAppChange), name: NSWorkspace.didTerminateApplicationNotification, object: nil)
+        
+        // ⚡️ 修复：监听本应用窗口最小化
+        NotificationCenter.default.addObserver(self, selector: #selector(handleAppChange), name: NSWindow.didMiniaturizeNotification, object: nil)
     }
     
     func stopMonitoring() {
@@ -68,7 +75,12 @@ class DockMonitor: ObservableObject {
             // 尝试移除其他可能添加的通知
             AXObserverRemoveNotification(observer, dockRef, kAXUIElementDestroyedNotification as CFString)
             AXObserverRemoveNotification(observer, dockRef, kAXWindowResizedNotification as CFString)
+            AXObserverRemoveNotification(observer, dockRef, kAXElementBusyChangedNotification as CFString)
+            AXObserverRemoveNotification(observer, dockRef, kAXFocusedUIElementChangedNotification as CFString)
         }
+        
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
+        NotificationCenter.default.removeObserver(self)
         observer = nil
         dockApp = nil
         dockElement = nil
@@ -117,6 +129,12 @@ class DockMonitor: ObservableObject {
         // 监听大小改变（Dock 大小调整）
         AXObserverAddNotification(observer, dockRef, kAXWindowResizedNotification as CFString, UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque()))
         
+        // ⚡️ 修复：监听 ElementBusy (通常在 Dock 动画/最小化时触发)
+        AXObserverAddNotification(observer, dockRef, kAXElementBusyChangedNotification as CFString, UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque()))
+        
+        // ⚡️ 修复：监听焦点变化 (作为 fallback)
+        AXObserverAddNotification(observer, dockRef, kAXFocusedUIElementChangedNotification as CFString, UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque()))
+        
         // 将观察者添加到 RunLoop
         CFRunLoopAddSource(CFRunLoopGetCurrent(), AXObserverGetRunLoopSource(observer), .defaultMode)
         
@@ -139,13 +157,23 @@ class DockMonitor: ObservableObject {
         }
     }
     
+    @objc private func handleAppChange(_ notification: Notification) {
+        // print("🔄 DockMonitor: 应用状态改变，刷新 Dock 布局")
+        debounceScan()
+    }
+    
     private func performScan() {
         // 捕获缓存的 element 以便在 detached task 中使用
         // 注意：AXUIElement 是线程安全的 CoreFoundation 对象
         guard let dockRef = self.dockElement else { return }
         
         Task.detached {
-            let newIcons = await self.scanDockIcons(using: dockRef)
+            // ⚡️ 修复：处理扫描失败的情况 (返回 nil)
+            guard let newIcons = await self.scanDockIcons(using: dockRef) else {
+                print("⚠️ DockMonitor: 扫描失败 (可能是 Dock 忙碌)，保留旧数据")
+                return
+            }
+            
             await MainActor.run {
                 self.icons = newIcons
                 print("🔄 DockMonitor: 更新了 \(newIcons.count) 个图标")
@@ -154,11 +182,13 @@ class DockMonitor: ObservableObject {
     }
     
     // 复用 WindowEngine 中的逻辑，但独立出来以便解耦
-    private func scanDockIcons(using dockRef: AXUIElement) async -> [DockIconInfo] {
+    // ⚡️ 修复：返回可选值，nil 表示扫描失败
+    private func scanDockIcons(using dockRef: AXUIElement) async -> [DockIconInfo]? {
         var icons: [DockIconInfo] = []
         
         guard let children = AXUtils.getAXAttribute(dockRef, kAXChildrenAttribute, ofType: [AXUIElement].self) else {
-            return []
+            // ⚡️ 修复：获取子元素失败 (例如 Dock 正在动画)，返回 nil 而不是空数组
+            return nil
         }
         
         for child in children {

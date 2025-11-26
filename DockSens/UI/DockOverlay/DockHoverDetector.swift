@@ -17,18 +17,17 @@ class DockHoverDetector: ObservableObject {
     @Published var isHovering: Bool = false
 
     // MARK: - Private Properties
-    private var eventMonitor: Any?
-    // 移除本地 cachedIcons，改用 dockMonitor.icons
-    // private var cachedIcons: [DockIconInfo] = []
+    private var eventTap: CFMachPort?
+    private var runLoopSource: CFRunLoopSource?
+    
     private let dockMonitor: DockMonitor
     private var cancellables = Set<AnyCancellable>()
 
-    // FIX: 使用 Task 替代 Timer，解决 Swift 6 "Reference to captured var self" 并发警告
     private var hoverTask: Task<Void, Never>?
 
-    // 🔧 修复：添加暂停状态，点击后暂停悬停检测
     private var isPaused: Bool = false
     private var lastMousePosition: CGPoint = .zero
+    private var lastRefreshTime: Date = .distantPast
     
     init(dockMonitor: DockMonitor) {
         self.dockMonitor = dockMonitor
@@ -37,41 +36,72 @@ class DockHoverDetector: ObservableObject {
     // MARK: - Public Methods
     
     func startMonitoring() {
-        // 1. 监听 DockMonitor 的图标更新
-        // 注意：这里不需要手动赋值 cachedIcons，直接在 handleMouseMove 中访问 dockMonitor.icons 即可
-        // 或者如果为了性能考虑，可以在这里订阅并更新本地缓存（但 DockMonitor 已经在 MainActor，直接访问很快）
+        // 使用 CGEventTap 替代 NSEvent.addGlobalMonitor
+        // 这可以确保即使 App 处于活跃状态但没有 Key Window (例如最小化时)，也能捕获鼠标事件
+        let eventMask = (1 << CGEventType.mouseMoved.rawValue)
         
-        // 2. 注册全局鼠标移动监听
-        // NSEvent.addGlobalMonitorForEvents 仅当 App 处于后台时生效
-        // 如果需要前台也能生效，需结合 addLocalMonitorForEvents
-        eventMonitor = NSEvent.addGlobalMonitorForEvents(matching: .mouseMoved) { [weak self] event in
-            self?.handleMouseMove(event)
+        guard let eventTap = CGEvent.tapCreate(
+            tap: .cghidEventTap,
+            place: .headInsertEventTap,
+            options: .listenOnly,
+            eventsOfInterest: CGEventMask(eventMask),
+            callback: { (proxy, type, event, refcon) -> Unmanaged<CGEvent>? in
+                if let refcon = refcon {
+                    let detector = Unmanaged<DockHoverDetector>.fromOpaque(refcon).takeUnretainedValue()
+                    if type == .mouseMoved {
+                        Task { @MainActor in
+                            if let nsEvent = NSEvent(cgEvent: event) {
+                                detector.handleMouseMove(nsEvent)
+                            }
+                        }
+                    }
+                }
+                return Unmanaged.passUnretained(event)
+            },
+            userInfo: UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
+        ) else {
+            print("⚠️ DockHoverDetector: 创建 CGEventTap 失败")
+            return
         }
+        
+        self.eventTap = eventTap
+        
+        let runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, eventTap, 0)
+        self.runLoopSource = runLoopSource
+        CFRunLoopAddSource(CFRunLoopGetCurrent(), runLoopSource, .commonModes)
+        CGEvent.tapEnable(tap: eventTap, enable: true)
+        
+        print("✅ DockHoverDetector: 开始监听鼠标移动 (CGEventTap)")
     }
     
     func stopMonitoring() {
-        if let monitor = eventMonitor {
-            NSEvent.removeMonitor(monitor)
-            eventMonitor = nil
+        if let runLoopSource = runLoopSource {
+            CFRunLoopRemoveSource(CFRunLoopGetCurrent(), runLoopSource, .commonModes)
+            self.runLoopSource = nil
         }
+        if let eventTap = eventTap {
+            CGEvent.tapEnable(tap: eventTap, enable: false)
+            self.eventTap = nil
+        }
+        
         hoverTask?.cancel()
         cancellables.removeAll()
     }
 
-    // 🔧 修复：暂停悬停检测（点击后调用）
+    // 暂停悬停检测（点击后调用）
     func pauseHoverDetection() {
         isPaused = true
         lastMousePosition = NSEvent.mouseLocation
         print("🔇 DockHoverDetector: 暂停悬停检测")
     }
 
-    // 🔧 修复：恢复悬停检测（鼠标移动后自动调用）
+    // 恢复悬停检测（鼠标移动后自动调用）
     private func resumeHoverDetection() {
         isPaused = false
         print("🔊 DockHoverDetector: 恢复悬停检测")
     }
     
-    // 🔧 新增：允许外部显式控制暂停（用于预览窗口交互时）
+    // 允许外部显式控制暂停（用于预览窗口交互时）
     func setExplicitlyPaused(_ paused: Bool) {
         if paused {
             isPaused = true
@@ -87,7 +117,7 @@ class DockHoverDetector: ObservableObject {
     // MARK: - Logic
     
     private func handleMouseMove(_ event: NSEvent) {
-        // 🔧 修复：如果暂停了，检查鼠标是否移动
+        // 如果暂停了，检查鼠标是否移动
         if isPaused {
             let currentPosition = NSEvent.mouseLocation
             let distance = hypot(currentPosition.x - lastMousePosition.x, currentPosition.y - lastMousePosition.y)
@@ -124,13 +154,16 @@ class DockHoverDetector: ObservableObject {
                 startHoverTimer(for: hitIcon)
             }
         } else {
-            // 🔧 修复：如果在 Dock 区域深处（例如底部 50pt）但没有匹配到图标，
+            // 如果在 Dock 区域深处（例如底部 50pt）但没有匹配到图标，
             // 可能是因为 Dock 布局改变（如放大）导致缓存失效。
             // 此时强制刷新 DockMonitor。
             if mousePointTopLeft.y > (screenHeight - 50) {
-                // 限制刷新频率，避免每帧都刷新
-                // DockMonitor.refresh() 内部已经有防抖，所以这里可以直接调用
-                dockMonitor.refresh()
+                // 限制刷新频率，避免每帧都刷新导致 Debounce 永远无法触发
+                let now = Date()
+                if now.timeIntervalSince(lastRefreshTime) > 1.0 {
+                    dockMonitor.refresh()
+                    lastRefreshTime = now
+                }
             }
             
             resetHover()

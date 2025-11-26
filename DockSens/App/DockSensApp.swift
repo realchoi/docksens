@@ -25,7 +25,9 @@ struct DockSensApp: App {
     var body: some Scene {
         // ⚡️ 修复2：使用 WindowGroup + ID 替代 Settings Scene
         // 这允许我们通过 openWindow 程序化地可靠打开它
-        WindowGroup(id: "settings") {
+        // ⚡️ 修复2：使用 Window 替代 WindowGroup
+        // Window (macOS 13+) 确保只有一个实例
+        Window("Settings", id: "settings") {
             SettingsView()
                 .environment(appState)
                 .frame(minWidth: 550, minHeight: 400)
