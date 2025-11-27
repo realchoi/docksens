@@ -5,32 +5,35 @@
 //  Created by DockSens Team.
 //
 
-import AppKit
+import Foundation
 import ApplicationServices
 
-// ⚡️ 线程安全的 App AX 对象缓存
-final class AppAXCache: @unchecked Sendable {
-    private var cache: [pid_t: AXUIElement] = [:]
-    private let lock = NSLock()
+// ⚡️ Wrapper to make AXUIElement Sendable
+// Removed: using AnyObject directly to avoid MainActor inference
+
+// Private API to get CGWindowID from AXUIElement
+@_silgen_name("_AXUIElementGetWindow")
+nonisolated func _AXUIElementGetWindow(_ element: AnyObject, _ windowID: inout UInt32) -> AXError
+
+// ⚡️ 线程安全的 App AX 对象缓存 (Actor)
+actor SafeAppAXCache {
+    // Store as AnyObject to avoid MainActor inference
+    private var cache: [pid_t: AnyObject] = [:]
     
     init() {}
     
-    func getElement(for pid: pid_t) -> AXUIElement {
-        lock.lock()
-        defer { lock.unlock() }
-        
+    func getElement(for pid: pid_t) -> AnyObject {
         if let element = cache[pid] {
             return element
         }
         
         let element = AXUIElementCreateApplication(pid)
-        cache[pid] = element
-        return element
+        let storage = element as AnyObject
+        cache[pid] = storage
+        return storage
     }
     
     func clear() {
-        lock.lock()
-        defer { lock.unlock() }
         cache.removeAll()
     }
 }

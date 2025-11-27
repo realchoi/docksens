@@ -43,14 +43,17 @@ enum AXUtils {
     /// - Parameters:
     ///   - window: The window info to raise
     ///   - tolerance: Distance tolerance for matching window position (default 100)
+    /// 提升窗口层级
     nonisolated static func raiseWindow(_ window: WindowInfo, tolerance: Double = 100.0) {
-        // ⚡️ 性能优化：如果已经有缓存的 AXUIElement，直接使用
-        if let cachedElement = window.axElement {
-            performRaise(cachedElement.element, title: window.title)
+        // 1. 尝试使用 AX API 提升
+        if let wrapper = window.axElement {
+            // Cast AnyObject to AXUIElement
+            let element = wrapper.value as! AXUIElement
+            performRaise(element, title: window.title)
             return
         }
         
-        // 降级方案：重新查找窗口
+        // 2. 如果没有缓存，尝试重新获取
         let pid = window.pid
         let targetTitle = window.title
         let targetFrame = window.frame
@@ -126,8 +129,10 @@ enum AXUtils {
     /// Minimize a window using AX API
     nonisolated static func minimizeWindow(_ window: WindowInfo, tolerance: Double = 100.0) {
         // ⚡️ 性能优化：如果已经有缓存的 AXUIElement，直接使用
-        if let cachedElement = window.axElement {
-            let result = AXUIElementSetAttributeValue(cachedElement.element, kAXMinimizedAttribute as CFString, true as CFTypeRef)
+        if let wrapper = window.axElement {
+            // Cast AnyObject to AXUIElement
+            let element = wrapper.value as! AXUIElement
+            let result = AXUIElementSetAttributeValue(element, kAXMinimizedAttribute as CFString, true as CFTypeRef)
             if result == .success {
                 print("✅ AXUtils: Minimized window '\(window.title)' (cached)")
             } else {

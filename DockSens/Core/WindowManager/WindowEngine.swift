@@ -10,37 +10,17 @@ import ApplicationServices
 import CoreGraphics
 import ScreenCaptureKit
 
+// Private API to get CGWindowID from AXUIElement
+// Moved to AppAXCache.swift
+
 // ⚡️ Wrapper to make AXUIElement Sendable
-struct SendableAXUIElement: @unchecked Sendable {
-    let element: AXUIElement
-}
+// Moved to AppAXCache.swift
 
 // MARK: - Data Models
 
-struct WindowInfo: Identifiable, @unchecked Sendable {
-    // ⚡️ UI 唯一标识 (每次生成，解决渲染冲突)
-    let id: UUID
-    // ⚡️ 系统标识 (可能为 0，用于排序参考)
-    let windowID: UInt32
-    
-    let pid: pid_t
-    let title: String
-    let appName: String
-    let bundleIdentifier: String
-    let frame: CGRect
-    let image: CGImage?
-    let isMinimized: Bool
-    
-    // ⚡️ 缓存的 AXUIElement，用于 O(1) 操作
-    let axElement: SendableAXUIElement?
-}
+// MARK: - Data Models
 
-struct DockIconInfo: Identifiable, Sendable {
-    let id: Int
-    let title: String
-    let frame: CGRect
-    let url: URL?
-}
+// WindowInfo and DockIconInfo moved to WindowInfo.swift
 
 private struct AXWindowData: @unchecked Sendable {
     let pid: pid_t
@@ -49,24 +29,162 @@ private struct AXWindowData: @unchecked Sendable {
     let isMinimized: Bool
     let appName: String
     let bundleID: String
-    let axElement: SendableAXUIElement
+    // Store as AnyObject to avoid MainActor inference
+    let axElement: AnyObject
+    // ⚡️ 新增：直接获取的 WindowID
+    let windowID: UInt32
 }
 
 // MARK: - Window Engine Actor
 
 actor WindowEngine {
     
+    // ... (omitted properties)
+    
+    // ⚡️ App AX 缓存
+    private let appAXCache = SafeAppAXCache()
+    
+    // ... (omitted activeWindows and windows(for:) implementations - assume they are updated to use AnyObject in WindowInfo constructor)
+    
+    // MARK: - Accessibility Fetcher (nonisolated)
+    
+    nonisolated private func fetchAXWindowData(for app: NSRunningApplication, using cache: SafeAppAXCache) async -> [AXWindowData] {
+        let pid = app.processIdentifier
+        // ⚡️ 使用缓存获取 App AX 对象 (await and cast)
+        let appRefStorage = await cache.getElement(for: pid)
+        let appRef = appRefStorage as! AXUIElement
+        
+        guard let windowsRef = AXUtils.getAXAttribute(appRef, kAXWindowsAttribute, ofType: [AXUIElement].self) else {
+            return []
+        }
+        
+        var results: [AXWindowData] = []
+        
+        for axWindow in windowsRef {
+            let title = AXUtils.getAXAttribute(axWindow, kAXTitleAttribute, ofType: String.self) ?? ""
+            if title.isEmpty { continue }
+            
+            var frame: CGRect = .zero
+            if let posValue = AXUtils.getAXAttribute(axWindow, kAXPositionAttribute, ofType: AXValue.self),
+               let sizeValue = AXUtils.getAXAttribute(axWindow, kAXSizeAttribute, ofType: AXValue.self) {
+                var pos = CGPoint.zero
+                var size = CGSize.zero
+                AXValueGetValue(posValue, .cgPoint, &pos)
+                AXValueGetValue(sizeValue, .cgSize, &size)
+                frame = CGRect(origin: pos, size: size)
+            }
+            
+            if frame.width < 20 || frame.height < 20 { continue }
+            
+            let isMinimized = AXUtils.getAXAttribute(axWindow, kAXMinimizedAttribute, ofType: Bool.self) ?? false
+            
+            // ⚡️ 尝试获取 WindowID
+            var windowID: UInt32 = 0
+            // Cast axWindow to AnyObject for _AXUIElementGetWindow
+            _ = _AXUIElementGetWindow(axWindow as AnyObject, &windowID)
+            
+            let data = AXWindowData(
+                pid: pid,
+                title: title,
+                frame: frame,
+                isMinimized: isMinimized,
+                // 修改点：支持 "Unknown" 的本地化
+                appName: app.localizedName ?? String(localized: "Unknown"),
+                bundleID: app.bundleIdentifier ?? "",
+                // Store as AnyObject
+                axElement: axWindow as AnyObject,
+                windowID: windowID
+            )
+            results.append(data)
+        }
+        
+        return results
+    }
+    
+    // MARK: - Fast State Checking
+    
+    /// 快速检查应用是否处于前台且有可见的焦点窗口
+    /// 用于 Dock 点击时的“最小化”判断
+    nonisolated func isAppFocusedAndVisible(pid: pid_t) async -> Bool {
+        // 1. 检查是否是前台应用
+        guard let frontmost = await MainActor.run(body: { NSWorkspace.shared.frontmostApplication }),
+              frontmost.processIdentifier == pid else {
+            return false
+        }
+        
+        // 2. 获取 AX 对象 (await cache)
+        // Since we are nonisolated, we can await the actor
+        // But we need access to appAXCache.
+        // appAXCache is private to WindowEngine.
+        // We cannot access it from nonisolated method unless we pass it or expose it.
+        // But WindowEngine is an actor.
+        // I should make this method isolated to the actor (remove nonisolated) or pass the cache?
+        // If I make it isolated, I can access appAXCache.
+        // Let's make it isolated (remove nonisolated).
+        
+        return await self.checkAppFocusedAndVisible(pid: pid)
+    }
+    
+    private func checkAppFocusedAndVisible(pid: pid_t) async -> Bool {
+         // 2. 获取 AX 对象
+        let appRefStorage = await appAXCache.getElement(for: pid)
+        let appRef = appRefStorage as! AXUIElement
+        
+        // 3. 获取焦点窗口
+        var focusedWindowRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(appRef, kAXFocusedWindowAttribute as CFString, &focusedWindowRef) == .success else {
+            return false
+        }
+        let focusedWindow = focusedWindowRef as! AXUIElement
+        
+        // 4. 检查最小化状态
+        // 如果窗口被最小化，它通常不会是 FocusedWindow，或者 Minimized 属性为 true
+        if let isMinimized = AXUtils.getAXAttribute(focusedWindow, kAXMinimizedAttribute, ofType: Bool.self),
+           isMinimized {
+            return false
+        }
+        
+        // 5. 再次确认该窗口是否有效（有标题或大小）
+        // 有些应用可能有不可见的焦点窗口
+        if let sizeValue = AXUtils.getAXAttribute(focusedWindow, kAXSizeAttribute, ofType: AXValue.self) {
+            var size = CGSize.zero
+            AXValueGetValue(sizeValue, .cgSize, &size)
+            if size.width < 10 || size.height < 10 { return false }
+        }
+        
+        return true
+    }
+    
     // MARK: - Image Cache
     
     private let imageCache = WindowImageCache(maxSize: 50, maxAge: 2.5)
     
-    // ⚡️ App AX 缓存
-    private let appAXCache = AppAXCache()
+    // ⚡️ App AX 缓存 (Declared at top)
+    // private let appAXCache = SafeAppAXCache()
+    
+    // MARK: - SCShareableContent Micro-caching
+    
+    private var cachedShareableContent: SCShareableContent?
+    private var lastContentFetchTime: Date?
+    private let contentCacheDuration: TimeInterval = 0.2 // 200ms cache
+    
+    private func getShareableContent() async throws -> SCShareableContent {
+        if let content = cachedShareableContent,
+           let lastFetch = lastContentFetchTime,
+           Date().timeIntervalSince(lastFetch) < contentCacheDuration {
+            return content
+        }
+        
+        let content = try await SCShareableContent.current
+        cachedShareableContent = content
+        lastContentFetchTime = Date()
+        return content
+    }
     
     // MARK: - 1. Window Scanning (AX-Driven with SCK-Enrichment)
     
     func activeWindows() async throws -> [WindowInfo] {
-        async let scWindowsTask = try? SCShareableContent.current.windows
+        async let scWindowsTask = try? self.getShareableContent().windows
         
         let regularApps = NSWorkspace.shared.runningApplications
             .filter { $0.activationPolicy == .regular }
@@ -78,8 +196,8 @@ actor WindowEngine {
             for app in regularApps {
                 if app.processIdentifier == selfPID { continue }
                 group.addTask {
-                    // ⚡️ 传递缓存
-                    return self.fetchAXWindowData(for: app, using: self.appAXCache)
+                    // ⚡️ 传递缓存 (async call)
+                    return await self.fetchAXWindowData(for: app, using: self.appAXCache)
                 }
             }
             var allAX: [AXWindowData] = []
@@ -119,38 +237,15 @@ actor WindowEngine {
                     
                     var appResults: [WindowInfo] = []
                     
-                    for axWin in appWindows {
-                        // 尝试匹配 SCK 窗口
-                        let match = scWindows.first { scWin in
-                            guard let scPID = scWin.owningApplication?.processID, scPID == axWin.pid else { return false }
-                            if scWin.windowLayer != 0 { return false }
-                            
-                            // 1. 标题匹配
-                            let scTitle = scWin.title ?? ""
-                            if !axWin.title.isEmpty && !scTitle.isEmpty {
-                                if scTitle.contains(axWin.title) || axWin.title.contains(scTitle) {
-                                    return true
-                                }
-                            }
-                            
-                            // 2. 几何匹配
-                            let axCenter = CGPoint(x: axWin.frame.midX, y: axWin.frame.midY)
-                            let scCenter = CGPoint(x: scWin.frame.midX, y: scWin.frame.midY)
-                            let distance = hypot(axCenter.x - scCenter.x, axCenter.y - scCenter.y)
-                            
-                            if distance < 100 {
-                                let axArea = axWin.frame.width * axWin.frame.height
-                                let scArea = scWin.frame.width * scWin.frame.height
-                                if scArea > 0 && axArea > 0 {
-                                    let ratio = scArea / axArea
-                                    if ratio > 0.5 && ratio < 5.0 { return true }
-                                }
-                            }
-                            return false
-                        }
-                        
+                    // ⚡️ Fix: Filter SC windows for this app and consume them to prevent duplicates
+                    let appSCWindows = scWindows.filter { $0.owningApplication?.processID == app.processIdentifier }
+                    
+                    // Use multi-pass matching
+                    let matchedPairs = self.matchWindows(appWindows, with: appSCWindows)
+                    
+                    for (axWin, match) in matchedPairs {
                         var image: CGImage? = nil
-                        var sysID: UInt32 = 0
+                        var sysID: UInt32 = axWin.windowID // 默认为 AX 获取到的 ID
                         
                         if let scMatch = match {
                             sysID = scMatch.windowID
@@ -170,7 +265,7 @@ actor WindowEngine {
                                 // 捕获并裁剪透明边缘
                                 if let fullImage = try? await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config) {
                                     // 裁剪掉图片边缘的透明区域
-                                    let croppedImage = self.cropTransparentEdges(from: fullImage) ?? fullImage
+                                    let croppedImage = ImageUtils.cropTransparentEdges(from: fullImage) ?? fullImage
                                     image = croppedImage
                                     // 存入缓存
                                     await self.imageCache.setImage(croppedImage, for: sysID, frame: axWin.frame)
@@ -178,7 +273,7 @@ actor WindowEngine {
                             }
                         }
                         
-                        appResults.append(WindowInfo(
+                        appResults.append(await WindowInfo(
                             id: UUID(),
                             windowID: sysID,
                             pid: axWin.pid,
@@ -188,7 +283,7 @@ actor WindowEngine {
                             frame: axWin.frame,
                             image: image,
                             isMinimized: axWin.isMinimized,
-                            axElement: axWin.axElement
+                            axElement: AXElementWrapper(axWin.axElement)
                         ))
                     }
                     return appResults
@@ -220,11 +315,11 @@ actor WindowEngine {
     
     // ⚡️ 性能优化：仅获取特定应用的窗口
     func windows(for targetApp: NSRunningApplication) async throws -> [WindowInfo] {
-        async let scWindowsTask = try? SCShareableContent.current.windows
+        async let scWindowsTask = try? self.getShareableContent().windows
         
         // 1. 仅获取目标应用的 AX 窗口
-        // ⚡️ 使用缓存
-        let axWindows = self.fetchAXWindowData(for: targetApp, using: self.appAXCache)
+        // ⚡️ 使用缓存 (async call)
+        let axWindows = await self.fetchAXWindowData(for: targetApp, using: self.appAXCache)
         
         let scWindows = await scWindowsTask ?? []
         
@@ -248,38 +343,15 @@ actor WindowEngine {
         
         var appResults: [WindowInfo] = []
         
-        for axWin in axWindows {
-            // 尝试匹配 SCK 窗口
-            let match = scWindows.first { scWin in
-                guard let scPID = scWin.owningApplication?.processID, scPID == axWin.pid else { return false }
-                if scWin.windowLayer != 0 { return false }
-                
-                // 1. 标题匹配
-                let scTitle = scWin.title ?? ""
-                if !axWin.title.isEmpty && !scTitle.isEmpty {
-                    if scTitle.contains(axWin.title) || axWin.title.contains(scTitle) {
-                        return true
-                    }
-                }
-                
-                // 2. 几何匹配
-                let axCenter = CGPoint(x: axWin.frame.midX, y: axWin.frame.midY)
-                let scCenter = CGPoint(x: scWin.frame.midX, y: scWin.frame.midY)
-                let distance = hypot(axCenter.x - scCenter.x, axCenter.y - scCenter.y)
-                
-                if distance < 100 {
-                    let axArea = axWin.frame.width * axWin.frame.height
-                    let scArea = scWin.frame.width * scWin.frame.height
-                    if scArea > 0 && axArea > 0 {
-                        let ratio = scArea / axArea
-                        if ratio > 0.5 && ratio < 5.0 { return true }
-                    }
-                }
-                return false
-            }
-            
+        // ⚡️ Fix: Filter SC windows for this app and consume them to prevent duplicates
+        let appSCWindows = scWindows.filter { $0.owningApplication?.processID == targetApp.processIdentifier }
+        
+        // Use multi-pass matching
+        let matchedPairs = self.matchWindows(axWindows, with: appSCWindows)
+        
+        for (axWin, match) in matchedPairs {
             var image: CGImage? = nil
-            var sysID: UInt32 = 0
+            var sysID: UInt32 = axWin.windowID
             
             if let scMatch = match {
                 sysID = scMatch.windowID
@@ -299,7 +371,7 @@ actor WindowEngine {
                     // 捕获并裁剪透明边缘
                     if let fullImage = try? await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config) {
                         // 裁剪掉图片边缘的透明区域
-                        let croppedImage = self.cropTransparentEdges(from: fullImage) ?? fullImage
+                        let croppedImage = ImageUtils.cropTransparentEdges(from: fullImage) ?? fullImage
                         image = croppedImage
                         // 存入缓存
                         await self.imageCache.setImage(croppedImage, for: sysID, frame: axWin.frame)
@@ -307,7 +379,7 @@ actor WindowEngine {
                 }
             }
             
-            appResults.append(WindowInfo(
+            appResults.append(await WindowInfo(
                 id: UUID(),
                 windowID: sysID,
                 pid: axWin.pid,
@@ -317,7 +389,7 @@ actor WindowEngine {
                 frame: axWin.frame,
                 image: image,
                 isMinimized: axWin.isMinimized,
-                axElement: axWin.axElement
+                axElement: AXElementWrapper(axWin.axElement)
             ))
         }
         
@@ -337,92 +409,6 @@ actor WindowEngine {
         return sorted
     }
     
-    // MARK: - Accessibility Fetcher (nonisolated)
-    
-    nonisolated private func fetchAXWindowData(for app: NSRunningApplication, using cache: AppAXCache) -> [AXWindowData] {
-        let pid = app.processIdentifier
-        // ⚡️ 使用缓存获取 App AX 对象
-        let appRef = cache.getElement(for: pid)
-        
-        guard let windowsRef = AXUtils.getAXAttribute(appRef, kAXWindowsAttribute, ofType: [AXUIElement].self) else {
-            return []
-        }
-        
-        var results: [AXWindowData] = []
-        
-        for axWindow in windowsRef {
-            let title = AXUtils.getAXAttribute(axWindow, kAXTitleAttribute, ofType: String.self) ?? ""
-            if title.isEmpty { continue }
-            
-            var frame: CGRect = .zero
-            if let posValue = AXUtils.getAXAttribute(axWindow, kAXPositionAttribute, ofType: AXValue.self),
-               let sizeValue = AXUtils.getAXAttribute(axWindow, kAXSizeAttribute, ofType: AXValue.self) {
-                var pos = CGPoint.zero
-                var size = CGSize.zero
-                AXValueGetValue(posValue, .cgPoint, &pos)
-                AXValueGetValue(sizeValue, .cgSize, &size)
-                frame = CGRect(origin: pos, size: size)
-            }
-            
-            if frame.width < 20 || frame.height < 20 { continue }
-            
-            let isMinimized = AXUtils.getAXAttribute(axWindow, kAXMinimizedAttribute, ofType: Bool.self) ?? false
-            
-            let data = AXWindowData(
-                pid: pid,
-                title: title,
-                frame: frame,
-                isMinimized: isMinimized,
-                // 修改点：支持 "Unknown" 的本地化
-                appName: app.localizedName ?? String(localized: "Unknown"),
-                bundleID: app.bundleIdentifier ?? "",
-                axElement: SendableAXUIElement(element: axWindow)
-            )
-            results.append(data)
-        }
-        
-        return results
-    }
-    
-    // MARK: - Fast State Checking
-    
-    /// 快速检查应用是否处于前台且有可见的焦点窗口
-    /// 用于 Dock 点击时的“最小化”判断
-    nonisolated func isAppFocusedAndVisible(pid: pid_t) -> Bool {
-        // 1. 检查是否是前台应用
-        guard let frontmost = NSWorkspace.shared.frontmostApplication,
-              frontmost.processIdentifier == pid else {
-            return false
-        }
-        
-        // 2. 获取 AX 对象
-        let appRef = appAXCache.getElement(for: pid)
-        
-        // 3. 获取焦点窗口
-        var focusedWindowRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(appRef, kAXFocusedWindowAttribute as CFString, &focusedWindowRef) == .success else {
-            return false
-        }
-        let focusedWindow = focusedWindowRef as! AXUIElement
-        
-        // 4. 检查最小化状态
-        // 如果窗口被最小化，它通常不会是 FocusedWindow，或者 Minimized 属性为 true
-        if let isMinimized = AXUtils.getAXAttribute(focusedWindow, kAXMinimizedAttribute, ofType: Bool.self),
-           isMinimized {
-            return false
-        }
-        
-        // 5. 再次确认该窗口是否有效（有标题或大小）
-        // 有些应用可能有不可见的焦点窗口
-        if let sizeValue = AXUtils.getAXAttribute(focusedWindow, kAXSizeAttribute, ofType: AXValue.self) {
-            var size = CGSize.zero
-            AXValueGetValue(sizeValue, .cgSize, &size)
-            if size.width < 10 || size.height < 10 { return false }
-        }
-        
-        return true
-    }
-    
     // MARK: - 2. Dock Scanning
     
     // scanDockIcons 已移除，逻辑已迁移至 DockMonitor
@@ -432,128 +418,89 @@ actor WindowEngine {
         return AXUtils.checkAccessibilityPermission()
     }
     
-    // 裁剪 CGImage 边缘的透明区域
-    // ⚡️ 性能优化版：从边缘向内扫描，大幅减少遍历次数
-    // ⚡️ 二次优化：使用 Stride Skipping (跳步扫描) 加速初始探测
-    nonisolated private func cropTransparentEdges(from image: CGImage) -> CGImage? {
-        let width = image.width
-        let height = image.height
+
+    
+    // MARK: - Helper Methods
+    
+    private nonisolated func matchWindows(_ axWindows: [AXWindowData], with scWindows: [SCWindow]) -> [(AXWindowData, SCWindow?)] {
+        var matches: [Int: SCWindow] = [:] // axWindow index -> SCWindow
+        var availableSC = scWindows
         
-        guard let dataProvider = image.dataProvider,
-              let data = dataProvider.data,
-              let bytes = CFDataGetBytePtr(data) else {
-            return nil
+        // Pass 1: Exact ID Match (Highest Confidence)
+        for (index, axWin) in axWindows.enumerated() {
+            if axWin.windowID == 0 { continue }
+            if let scIndex = availableSC.firstIndex(where: { $0.windowID == axWin.windowID }) {
+                matches[index] = availableSC[scIndex]
+                availableSC.remove(at: scIndex)
+            }
         }
         
-        let bytesPerPixel = 4
-        let bytesPerRow = image.bytesPerRow
-        
-        // 检查像素是否透明（alpha < 10）
-        // 内联函数以减少调用开销
-        func isTransparent(_ x: Int, _ y: Int) -> Bool {
-            let offset = y * bytesPerRow + x * bytesPerPixel + 3 // alpha通道
-            return bytes[offset] < 10
+        // Pass 2: Strong Match (Title + Geometry)
+        for (index, axWin) in axWindows.enumerated() {
+            if matches[index] != nil { continue }
+            
+            if let scIndex = availableSC.firstIndex(where: { scWin in
+                if scWin.windowLayer != 0 { return false }
+                
+                // Title Match
+                let scTitle = scWin.title ?? ""
+                let titleMatch = !axWin.title.isEmpty && !scTitle.isEmpty &&
+                    (scTitle.contains(axWin.title) || axWin.title.contains(scTitle))
+                
+                if !titleMatch { return false }
+                
+                // Geometry Match
+                let axCenter = CGPoint(x: axWin.frame.midX, y: axWin.frame.midY)
+                let scCenter = CGPoint(x: scWin.frame.midX, y: scWin.frame.midY)
+                let distance = hypot(axCenter.x - scCenter.x, axCenter.y - scCenter.y)
+                
+                // Strict distance for strong match
+                return distance < 50
+            }) {
+                matches[index] = availableSC[scIndex]
+                availableSC.remove(at: scIndex)
+            }
         }
         
-        var minX = 0
-        var maxX = width - 1
-        var minY = 0
-        var maxY = height - 1
-        
-        // ⚡️ 优化策略：
-        // 1. 粗略扫描：每隔 4 个像素检查一次 (stride = 4)
-        // 2. 精细修正：找到非透明点后，回溯查找精确边界
-        let stride = 4
-        
-        // 1. 扫描 Top (minY)
-        var foundTop = false
-        for y in 0..<height {
-            // 快速扫描行
-            var rowHasContent = false
-            for x in Swift.stride(from: 0, to: width, by: stride) {
-                if !isTransparent(x, y) {
-                    rowHasContent = true
-                    break
+        // Pass 3: Weak Match (Best Geometry)
+        for (index, axWin) in axWindows.enumerated() {
+            if matches[index] != nil { continue }
+            
+            var bestIndex: Int?
+            var minScore: Double = Double.infinity
+            
+            for (scIndex, scWin) in availableSC.enumerated() {
+                if scWin.windowLayer != 0 { continue }
+                
+                let axCenter = CGPoint(x: axWin.frame.midX, y: axWin.frame.midY)
+                let scCenter = CGPoint(x: scWin.frame.midX, y: scWin.frame.midY)
+                let distance = hypot(axCenter.x - scCenter.x, axCenter.y - scCenter.y)
+                
+                if distance < 100 {
+                    let axArea = axWin.frame.width * axWin.frame.height
+                    let scArea = scWin.frame.width * scWin.frame.height
+                    if scArea > 0 && axArea > 0 {
+                        let ratio = scArea / axArea
+                        if ratio > 0.5 && ratio < 2.0 {
+                            // Score based on distance (lower is better)
+                            if distance < minScore {
+                                minScore = distance
+                                bestIndex = scIndex
+                            }
+                        }
+                    }
                 }
             }
             
-            if rowHasContent {
-                minY = y
-                foundTop = true
-                break
+            if let best = bestIndex {
+                matches[index] = availableSC[best]
+                availableSC.remove(at: best)
             }
         }
         
-        // 如果没找到顶部非透明像素，说明全是透明的
-        if !foundTop { return nil }
-        
-        // 2. 扫描 Bottom (maxY)
-        for y in (minY..<height).reversed() {
-            var rowHasContent = false
-            for x in Swift.stride(from: 0, to: width, by: stride) {
-                if !isTransparent(x, y) {
-                    rowHasContent = true
-                    break
-                }
-            }
-            
-            if rowHasContent {
-                maxY = y
-                break
-            }
+        // Construct result
+        return axWindows.enumerated().map { (index, axWin) in
+            (axWin, matches[index])
         }
-        
-        // 3. 扫描 Left (minX) - 仅在 minY...maxY 范围内扫描
-        for x in 0..<width {
-            var colHasContent = false
-            // 纵向扫描也可以跳步
-            for y in Swift.stride(from: minY, to: maxY + 1, by: stride) {
-                if !isTransparent(x, y) {
-                    colHasContent = true
-                    break
-                }
-            }
-            
-            if colHasContent {
-                minX = x
-                break
-            }
-        }
-        
-        // 4. 扫描 Right (maxX) - 仅在 minY...maxY 范围内扫描
-        for x in (minX..<width).reversed() {
-            var colHasContent = false
-            for y in Swift.stride(from: minY, to: maxY + 1, by: stride) {
-                if !isTransparent(x, y) {
-                    colHasContent = true
-                    break
-                }
-            }
-            
-            if colHasContent {
-                maxX = x
-                break
-            }
-        }
-        
-        // ⚡️ 精细修正：因为跳步扫描可能漏掉边界上的像素，稍微扩大边界以确保安全
-        // 或者进行局部回溯（这里为了性能，简单地向外扩展 stride 大小，反正透明边缘多切一点少切一点影响不大）
-        minX = max(0, minX - stride)
-        maxX = min(width - 1, maxX + stride)
-        minY = max(0, minY - stride)
-        maxY = min(height - 1, maxY + stride)
-        
-        // 校验有效性
-        guard minX <= maxX && minY <= maxY else { return nil }
-        
-        // 裁剪到内容区域
-        let cropRect = CGRect(
-            x: minX,
-            y: minY,
-            width: maxX - minX + 1,
-            height: maxY - minY + 1
-        )
-        
-        return image.cropping(to: cropRect)
     }
 }

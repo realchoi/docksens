@@ -20,25 +20,34 @@ class DockMonitor: ObservableObject {
     
     // MARK: - Private Properties
     
-    // MARK: - Private Properties
-    
-    private var observer: AXObserver?
     private var dockApp: NSRunningApplication?
     private var scanTask: Task<Void, Never>?
     // ⚡️ 缓存 Dock 的 AXUIElement
     private var dockElement: AXUIElement?
+    
+    // RAII Token for Observer cleanup
+    private var observerToken: ObserverToken?
+    
+    // Health Check Timer
+    private var healthCheckTimer: Timer?
     
     // MARK: - Lifecycle
     
     init() {
         // 初始扫描
         startMonitoring()
+        startHealthCheck()
+    }
+    
+    deinit {
+        healthCheckTimer?.invalidate()
+        // observerToken deinit will handle cleanup
     }
     
     // MARK: - Public Methods
     
     func startMonitoring() {
-        guard observer == nil else { return }
+        guard observerToken == nil else { return }
         
         // 1. 找到 Dock 应用
         let dockApps = NSWorkspace.shared.runningApplications.filter { $0.bundleIdentifier == "com.apple.dock" }
@@ -69,19 +78,10 @@ class DockMonitor: ObservableObject {
     }
     
     func stopMonitoring() {
-        if let observer = observer, let app = dockApp {
-            let dockRef = AXUIElementCreateApplication(app.processIdentifier)
-            AXObserverRemoveNotification(observer, dockRef, kAXLayoutChangedNotification as CFString)
-            // 尝试移除其他可能添加的通知
-            AXObserverRemoveNotification(observer, dockRef, kAXUIElementDestroyedNotification as CFString)
-            AXObserverRemoveNotification(observer, dockRef, kAXWindowResizedNotification as CFString)
-            AXObserverRemoveNotification(observer, dockRef, kAXElementBusyChangedNotification as CFString)
-            AXObserverRemoveNotification(observer, dockRef, kAXFocusedUIElementChangedNotification as CFString)
-        }
+        observerToken = nil // This triggers deinit and cleanup
         
         NSWorkspace.shared.notificationCenter.removeObserver(self)
         NotificationCenter.default.removeObserver(self)
-        observer = nil
         dockApp = nil
         dockElement = nil
         scanTask?.cancel()
@@ -95,6 +95,41 @@ class DockMonitor: ObservableObject {
     
     // MARK: - Private Methods
     
+    private func startHealthCheck() {
+        healthCheckTimer?.invalidate()
+        healthCheckTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.performHealthCheck()
+            }
+        }
+    }
+    
+    private func performHealthCheck() {
+        // 检查当前跟踪的 Dock 进程是否仍然有效
+        guard let currentDockApp = dockApp else {
+            // 如果没有跟踪的 Dock，尝试重新启动监听
+            startMonitoring()
+            return
+        }
+        
+        // 检查 Dock 进程是否已终止
+        if currentDockApp.isTerminated {
+            print("⚠️ DockMonitor: 检测到 Dock 进程已终止，正在重新连接...")
+            stopMonitoring()
+            startMonitoring()
+            return
+        }
+        
+        // 检查当前运行的 Dock 进程 PID 是否与我们跟踪的一致
+        // (处理 killall Dock 后 PID 改变的情况)
+        let runningDockApps = NSWorkspace.shared.runningApplications.filter { $0.bundleIdentifier == "com.apple.dock" }
+        if let newDockApp = runningDockApps.first, newDockApp.processIdentifier != currentDockApp.processIdentifier {
+            print("⚠️ DockMonitor: 检测到 Dock PID 变化 (Old: \(currentDockApp.processIdentifier), New: \(newDockApp.processIdentifier))，正在重新连接...")
+            stopMonitoring()
+            startMonitoring()
+        }
+    }
+    
     // 移除 pollingTask
     
     private func setupObserver(for pid: pid_t) {
@@ -104,8 +139,26 @@ class DockMonitor: ObservableObject {
             guard let refcon = refcon else { return }
             let monitor = Unmanaged<DockMonitor>.fromOpaque(refcon).takeUnretainedValue()
             
-            Task { @MainActor in
-                monitor.handleNotification(notification as String)
+            // ⚡️ Fix: Capture monitor explicitly to avoid 'captured var' error
+            Task { [monitor] in
+                await MainActor.run {
+                    monitor.handleNotification(notification as String)
+                }
+            }
+            // 监听应用终止
+            // ⚡️ 修复：使用 NSWorkspace 通知
+            NSWorkspace.shared.notificationCenter.addObserver(
+                forName: NSWorkspace.didTerminateApplicationNotification,
+                object: nil,
+                queue: .main
+            ) { [weak monitor] notification in
+                guard let monitor = monitor,
+                      let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+                      app.bundleIdentifier == "com.apple.dock" else { return }
+                
+                Task { @MainActor in
+                    monitor.handleDockTermination()
+                }
             }
         }, &observerRef)
         
@@ -114,7 +167,6 @@ class DockMonitor: ObservableObject {
             return
         }
         
-        self.observer = observer
         
         // 获取 Dock 的 AXUIElement (使用缓存)
         guard let dockRef = self.dockElement else { return }
@@ -136,7 +188,11 @@ class DockMonitor: ObservableObject {
         AXObserverAddNotification(observer, dockRef, kAXFocusedUIElementChangedNotification as CFString, UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque()))
         
         // 将观察者添加到 RunLoop
-        CFRunLoopAddSource(CFRunLoopGetCurrent(), AXObserverGetRunLoopSource(observer), .defaultMode)
+        guard let runLoop = CFRunLoopGetCurrent() else { return }
+        CFRunLoopAddSource(runLoop, AXObserverGetRunLoopSource(observer), .defaultMode)
+        
+        // Create Token
+        self.observerToken = ObserverToken(observer: observer, element: dockRef, runLoop: runLoop)
         
         print("✅ DockMonitor: 开始监听 Dock 变化")
     }
@@ -181,6 +237,20 @@ class DockMonitor: ObservableObject {
         }
     }
     
+    // ⚡️ 修复：添加 handleDockTermination 方法
+    func handleDockTermination() {
+        print("⚠️ DockMonitor: Dock 进程终止，停止监听并重置状态")
+        stopMonitoring()
+        
+        // 尝试重新启动监听 (延迟执行)
+        Task {
+            try? await Task.sleep(for: .seconds(2))
+            await MainActor.run {
+                self.startMonitoring()
+            }
+        }
+    }
+    
     // 复用 WindowEngine 中的逻辑，但独立出来以便解耦
     // ⚡️ 修复：返回可选值，nil 表示扫描失败
     private func scanDockIcons(using dockRef: AXUIElement) async -> [DockIconInfo]? {
@@ -205,5 +275,36 @@ class DockMonitor: ObservableObject {
             }
         }
         return icons
+    }
+}
+
+// MARK: - Helper Classes
+
+private final class ObserverToken: @unchecked Sendable {
+    let observer: AXObserver
+    let element: AXUIElement
+    let runLoop: CFRunLoop
+    
+    init(observer: AXObserver, element: AXUIElement, runLoop: CFRunLoop) {
+        self.observer = observer
+        self.element = element
+        self.runLoop = runLoop
+    }
+    
+    deinit {
+        let obs = observer
+        let elem = element
+        let rl = runLoop
+        
+        // Remove notifications
+        AXObserverRemoveNotification(obs, elem, kAXLayoutChangedNotification as CFString)
+        AXObserverRemoveNotification(obs, elem, kAXUIElementDestroyedNotification as CFString)
+        AXObserverRemoveNotification(obs, elem, kAXWindowResizedNotification as CFString)
+        AXObserverRemoveNotification(obs, elem, kAXElementBusyChangedNotification as CFString)
+        AXObserverRemoveNotification(obs, elem, kAXFocusedUIElementChangedNotification as CFString)
+        
+        // Remove from runloop
+        let source = AXObserverGetRunLoopSource(obs)
+        CFRunLoopRemoveSource(rl, source, .defaultMode)
     }
 }

@@ -258,18 +258,23 @@ final class AppState {
         // 2. 快速检查：应用是否前台且有可见窗口？
         // 如果是，说明用户意图可能是“最小化”。
         // 如果不是（应用后台或窗口最小化），用户意图是“激活/恢复”，这部分交给系统处理，我们不干预。
-        let shouldMinimize = windowEngine.isAppFocusedAndVisible(pid: app.processIdentifier)
         
-        if shouldMinimize {
-            print("🖱️ AppState: MouseDown 检测到活跃窗口，准备在 Up 时最小化 (PID: \(app.processIdentifier))")
-            self.pendingMinimizePID = app.processIdentifier
-        } else {
-            self.pendingMinimizePID = nil
+        Task {
+            let shouldMinimize = await windowEngine.isAppFocusedAndVisible(pid: app.processIdentifier)
+            
+            await MainActor.run {
+                if shouldMinimize {
+                    print("🖱️ AppState: MouseDown 检测到活跃窗口，准备在 Up 时最小化 (PID: \(app.processIdentifier))")
+                    self.pendingMinimizePID = app.processIdentifier
+                } else {
+                    self.pendingMinimizePID = nil
+                }
+                
+                // 隐藏预览
+                dockPreviewPanel.hide()
+                dockHoverDetector.pauseHoverDetection()
+            }
         }
-        
-        // 隐藏预览
-        dockPreviewPanel.hide()
-        dockHoverDetector.pauseHoverDetection()
     }
 
     private func handleDockMouseUp(for icon: DockIconInfo) {
